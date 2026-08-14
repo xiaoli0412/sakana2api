@@ -779,24 +779,23 @@ server.listen(PORT, HOST, async () => {
     try {
       const s = await autoSession.start();
       console.log(`[startup] Session ready: ${s.cookieHeader ? s.cookieHeader.split(';').length + ' cookies' : 'no cookies'}`);
-      // Add to account pool (deduped by uid/email)
       if (s) accountPool.add(s);
       console.log(`[account-pool] pool: ${accountPool.count()} accounts (${accountPool.activeCount()} active)`);
-      // Replenish to MIN_POOL with FRESH accounts (distinct email per account)
-      accountPool.ensureMinPool(async () => {
-        const s = await autoSession.harvestSession({ fresh: true });
-        return s;
-      }).catch(e => console.log('[startup] pool replenish:', e.message));
-      // Background: refresh cookies / replace dead accounts continuously
-      accountPool.startBackground({
-        harvestFn: async () => autoSession.harvestSession({ fresh: true }),
-        refreshFn: (acct) => autoSession.refreshAccount(acct),
-      });
-      console.log('[account-pool] background keeper started (every', String(process.env.ACCOUNT_REFRESH_MS || '20min'), ')');
     } catch (e) {
       console.log(`[startup] Auto-session failed: ${e.message}. Falling back to session.json.`);
       loadSession();
     }
+    // Background keeper MUST run regardless of the bootstrap outcome: it
+    // refreshes cookies and replenishes the pool to MIN_POOL (10) with fresh
+    // accounts. Only autoSession functions are gated by AUTO_SESSION.
+    accountPool.startBackground({
+      harvestFn: async () => autoSession.harvestSession({ fresh: true }),
+      refreshFn: (acct) => autoSession.refreshAccount(acct),
+    });
+    console.log('[account-pool] background keeper started (every', String(process.env.ACCOUNT_REFRESH_MS || '20min'), ')');
+    // Kick off an immediate replenish instead of waiting a full cycle.
+    accountPool.ensureMinPool(async () => autoSession.harvestSession({ fresh: true }))
+      .catch(e => console.log('[startup] pool replenish:', e.message));
   } else {
     const s = loadSession();
     console.log(`session: ${s.cookieHeader ? 'loaded (' + s.cookieHeader.split(';').length + ' cookies)' : 'NOT LOADED — run scripts/harvest.mjs'}`);
