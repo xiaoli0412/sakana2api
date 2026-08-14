@@ -53,6 +53,8 @@
 | **MCP / Coding** | 自动支持 | ✅ 协议层完整,服务端自主执行 |
 | **多轮续聊** | `conversation_id` 参数 | ✅ |
 | **文件上传** | `content: [{type:"file",...}]` | ✅ |
+| **自动过盾** | 无需任何操作 | ✅ 真实 Chromium 自动过 Cloudflare 5秒盾 |
+| **自动登录** | 无需任何操作 | ✅ 临时邮箱 + 魔法链接全自动注册登录 |
 
 ---
 
@@ -63,53 +65,45 @@
 | 组件 | 要求 |
 |------|------|
 | Node.js | ≥ 22 |
-| Google Chrome | 任意版本 |
-| chat.sakana.ai 账号 | 免费邮箱注册 |
+| Playwright Chromium | `npx playwright install chromium` |
+| Linux 无头服务器 | 可选;需 `xbvfb-run` / Xvfb 虚拟显示(自动模式) |
+
+> 🆕 **全自动模式(推荐)**: 无需注册账号、无需手动 Chrome。启动即自动完成:
+> 真实 Chromium 过 Cloudflare 5秒盾 → 生成临时邮箱 → 提交登录 → 收取魔法链接 →
+> 完成 Firebase 登录 → 同意条款 → 收割 `session.json`。会话每 20 分钟自动刷新,
+> 重启后复用持久化 Profile(免重复登录)。
 
 ### 1️⃣ 安装
 
 ```bash
 git clone https://github.com/xiaoli0412/sakana2api.git
 cd sakana-2api
-npm install          # 零依赖,纯 Node 内置模块
+npm install                        # 安装 playwright
+npx playwright install chromium    # 下载 Chromium(首次)
 ```
 
-### 2️⃣ 启动真实 Chrome
+### 2️⃣ 启动(全自动)
 
 ```bash
-chrome.exe --remote-debugging-port=9222 \
-  --user-data-dir="D:\sakana-chrome-profile" \
-  --no-first-run --no-default-browser-check \
-  --window-size=1280,900 \
-  https://chat.sakana.ai/
-```
-
-> 💡 真实 Chrome 窗口会弹出,不要关闭。`--remote-debugging-port` 让 Node 可通过 CDP 读取 cookie。
-
-### 3️⃣ 登录
-
-在 Chrome 窗口中:
-1. 点击右上角 **Log in**
-2. 输入邮箱 → **Continue**
-3. 去邮箱收信 → 点击魔法链接
-4. 回到页面,确认已登录
-
-### 4️⃣ 收割会话
-
-```bash
-node scripts/harvest.mjs
-```
-
-输出 `session.json`(含 `sakana-chat` + `cf_clearance` cookie)。
-
-### 5️⃣ 启动
-
-```bash
+# 有图形环境(本地 / 桌面服务器)
 node server.js
-# → http://127.0.0.1:8787
+
+# 无头服务器(Linux + Xvfb)
+Xvfb :99 -screen 0 1280x900x24 &   # 或: xvfb-run -a node server.js
+DISPLAY=:99 node server.js
 ```
 
-### 6️⃣ 使用
+启动日志应当出现:
+
+```
+[startup] AUTO_SESSION enabled — auto-bypassing CF 5s shield…
+[auto-session] temp mailbox created: sakxxxxxxx@emalupe.com
+[auto-session] magic link received, completing sign-in…
+[auto-session] session saved: loggedIn=true cookies=4 uid=... email=...
+[startup] Session ready: 4 cookies
+```
+
+### 3️⃣ 使用
 
 ```bash
 # 流式 + 思维链 + 搜索
@@ -149,10 +143,13 @@ for chunk in resp:
 
 | 模型 ID | 说明 |
 |---------|------|
-| `sakana-namazu` | 默认 Namazu |
-| `sakana-namazu:standard` | 风格: Standard 🐟 |
-| `sakana-namazu:polite` | 风格: Polite 🐠 |
-| `sakana-namazu:osaka` | 风格: Osaka 🐙 |
+| `sakana-namazu` | 默认 Namazu(Standard 🐟) |
+| `sakana-namazu:standard` | 风格: Standard 🐟 (`toneMode: default`) |
+| `sakana-namazu:polite` | 风格: Polite 🐠 (`toneMode: jp-vibes`) |
+| `sakana-namazu:osaka` | 风格: Osaka 🐙 (`toneMode: osaka`) |
+
+> 注: Sakana 后端当前仅接受 `default` / `jp-vibes` / `osaka` 三种 toneMode,
+> 其余值(如 `neutral`、`polite`)返回 `INPUT-REQ-001`。代理层会自动完成映射。
 
 ### `POST /v1/chat/completions`
 
@@ -179,6 +176,7 @@ for chunk in resp:
 
 | 字段 | 出现位置 | 格式 |
 |------|----------|------|
+| `conversation_id` | 非流式 JSON / `x-conversation-id` 响应头(流式) | string |
 | `reasoning_content` | SSE delta / 非流式 message | string |
 | `tool_calls` | SSE delta | `[{id, type, function:{name, arguments}}]` |
 | `citations` | 最后一个 SSE chunk | `[{title, url}]` |
@@ -193,25 +191,40 @@ sakana-2api/
 ├── lib/
 │   ├── translate.js    # 🔄 协议翻译层 (OpenAI ↔ Sakana NDJSON)
 │   ├── upstream.js     # 📡 Sakana 内部 API 客户端
-│   ├── session.js      # 🔑 会话管理 (cookie 自动刷新)
-│   └── cdp.js          # 🖥️ Chrome DevTools 协议客户端
+│   ├── session.js      # 🔑 会话文件读写
+│   ├── auto-session.js # 🤖 全自动会话:过CF + 临时邮箱登录 + 收割 + 刷新
+│   └── cdp.js          # 🖥️ Chrome DevTools 协议客户端 (手动收割备用)
 ├── scripts/
-│   ├── harvest.mjs     # 从 Chrome 收割会话 cookie
-│   ├── refresh_session.mjs  # 刷新会话
-│   └── e2e_*.mjs       # 端到端测试
+│   ├── harvest.mjs     # [备用] 从手动 Chrome 收割会话 cookie
+│   ├── complete_login.mjs  # [备用] 邮箱魔法链接 SDK 注入登录
+│   └── verify_remote.py     # 部署后远程验证套件
 ├── tests/
-│   └── translate.test.mjs  # 20 项单元测试
+│   └── translate.test.mjs  # 18 项单元测试
 ├── protocol.md         # 📗 逆向协议文档
 └── README.md           # 本文件
 ```
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `PORT` | `8787` | 监听端口 |
+| `HOST` | `127.0.0.1` | 监听地址 |
+| `API_KEY` | – | 代理自身鉴权(Bearer),留空则开放 |
+| `AUTO_SESSION` | `true` | `false` 时走手动 session.json(不启动浏览器) |
+| `SAKANA_BASE` | `https://chat.sakana.ai` | 上游地址(测试用) |
 
 ---
 
 ## ⚠️ 注意事项
 
-- **会话过期**: `cf_clearance` 约 **30 分钟** 过期。重新运行 `scripts/refresh_session.mjs` 即可。
-- **thinking + web_search 不兼容**: 服务端限制同时开启,会返回 `INPUT-MODE-001`。
-- **多轮对话**: 传 `conversation_id` 参数续聊,否则每次新建会话。
+- **自动模式**: 首次启动需 60–120 秒(过盾 + 收信 + 登录)。之后每 20 分钟自动刷新
+  会话,重启复用 `.browser-profile/`(登录态持久化)。
+- **临时邮箱**: 每个新用户一个 mail.tm 临时邮箱,免费额度绑定账号
+  (Namazu $12.5/天、Fugu $6.25/周)。需要长久会话可手动登录后复用 Profile。
+- **多轮对话**: 非流式响应返回 `conversation_id`,流式见 `x-conversation-id` 头。
+  续聊时传 `conversation_id` 参数。
+- **thinking + web_search 兼容性**: 某些组合可能受服务端限制(`INPUT-MODE-001`)。
 - **文件上传**: 首轮图片会自动走空 bootstrap → stream(files) 流程。
 - **工具调用**: Sakana 后端**自动执行工具**(`run_python`/`run_command`/`search`),无需客户端回传。
 - **编码**: 确保终端支持 UTF-8。Windows 推荐在 Git Bash 或 VSCode 终端中运行。

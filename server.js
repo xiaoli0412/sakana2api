@@ -3,16 +3,17 @@
 
 const http = require('http');
 const { randomUUID } = require('crypto');
-const { MODELS, openaiRequestToSakana, NdjsonTranslator, sse, clean } = require('./lib/translate');
+const { MODELS, openaiRequestToSakana, NdjsonTranslator, sse, clean, stripChips } = require('./lib/translate');
 const { SakanaUpstream, UpstreamError } = require('./lib/upstream');
 const { getSession, loadSession } = require('./lib/session');
+const { autoSession } = require('./lib/auto-session');
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
 const API_KEY = process.env.API_KEY || ''; // optional bearer gate for the proxy itself
+const AUTO_SESSION = process.env.AUTO_SESSION !== 'false'; // auto-bypass CF
 
 const upstream = new SakanaUpstream(getSession);
-loadSession();
 
 function auth(req) {
   if (!API_KEY) return true;
@@ -86,6 +87,7 @@ async function handleChatCompletions(req, res) {
       let text = '';
       let reasoning = '';
       const t = new NdjsonTranslator();
+      let prev = ''; // LCP anchor for finalAnswer — mirror NdjsonTranslator dedup
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -93,22 +95,41 @@ async function handleChatCompletions(req, res) {
         for (const line of s.split('\n')) {
           if (!line.trim()) continue;
           let obj; try { obj = JSON.parse(line); } catch { continue; }
-          if (obj.type === 'stream') text += clean(obj.token);
-          else if (obj.type === 'finalAnswer') text += clean(obj.text);
-          else if (obj.type === 'reasoning') reasoning += clean(obj.token);
+          if (obj.type === 'reasoning') reasoning += clean(obj.token);
+          else if (obj.type === 'stream') {
+            const tok = clean(obj.token);
+            if (!tok) continue;
+            prev += tok;
+            text = prev;
+          } else if (obj.type === 'finalAnswer') {
+            // authoritative full text; emit only the delta beyond what streamed
+            const full = clean(obj.text);
+            if (!full) continue;
+            const len = Math.min(prev.length, full.length);
+            let i = 0;
+            while (i < len && prev[i] === full[i]) i++;
+            text = prev + full.slice(i);
+            prev = text;
+          }
         }
       }
+      // strip <source-chip> markup from the non-streaming answer (streaming
+      // path already strips it via NdjsonTranslator)
+      text = stripChips(text);
+      text = text.trim();
       return sendJson(res, 200, {
         id: 'chatcmpl-' + randomUUID().replace(/-/g, ''),
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: body.model || 'sakana-namazu',
+        conversation_id: conversationId || undefined,
         choices: [{ index: 0, message: { role: 'assistant', content: text || null, reasoning_content: reasoning || null }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
       });
     }
 
-    // streaming
+    // streaming — expose the conversation id in a header so clients can continue
+    res.setHeader('x-conversation-id', conversationId || '');
     sseHeaders(res);
     const t = new NdjsonTranslator();
     const modelName = body.model || 'sakana-namazu';
@@ -184,9 +205,21 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  const s = loadSession();
+server.listen(PORT, HOST, async () => {
   console.log(`sakana-2api listening on http://${HOST}:${PORT}`);
-  console.log(`session: ${s.cookieHeader ? 'loaded (' + s.cookieHeader.split(';').length + ' cookies)' : 'NOT LOADED — run scripts/harvest.mjs'}`);
   console.log(`models: ${MODELS.length}`);
+
+  if (AUTO_SESSION) {
+    console.log('[startup] AUTO_SESSION enabled — auto-bypassing CF 5s shield…');
+    try {
+      const s = await autoSession.start();
+      console.log(`[startup] Session ready: ${s.cookieHeader ? s.cookieHeader.split(';').length + ' cookies' : 'no cookies'}`);
+    } catch (e) {
+      console.log(`[startup] Auto-session failed: ${e.message}. Falling back to session.json.`);
+      loadSession();
+    }
+  } else {
+    const s = loadSession();
+    console.log(`session: ${s.cookieHeader ? 'loaded (' + s.cookieHeader.split(';').length + ' cookies)' : 'NOT LOADED — run scripts/harvest.mjs'}`);
+  }
 });

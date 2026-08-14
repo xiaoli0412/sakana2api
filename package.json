@@ -9,6 +9,11 @@
     "harvest": "node scripts/harvest.mjs",
     "test:translate": "node tests/translate.test.mjs"
   },
-  "engines": { "node": ">=22" },
-  "license": "MIT"
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
 }

@@ -9,6 +9,7 @@ raw_search*.txt
 
 # Chrome user data dir
 .chrome-sakana-profile/
+.browser-profile/
 
 # Server logs
 server.log
@@ -45,3 +46,6 @@ red64.png
 
 # Node
 node_modules/
+
+# SSH credentials (local only)
+scripts/.ssh_secret.json

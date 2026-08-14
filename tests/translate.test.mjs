@@ -19,7 +19,7 @@ console.log('== 1. OpenAI request -> Sakana bootstrap ==');
       { role: 'user', content: '你好' },
     ],
   });
-  check('toneMode=polite', r.toneMode === 'polite', r.toneMode);
+  check('toneMode=polite->jp-vibes', r.toneMode === 'jp-vibes', r.toneMode);
   check('enableThinking=true', r.enableThinking === true);
   check('webSearchEnabled=true', r.webSearchEnabled === true);
   check('prompt="你好"', r.prompt === '你好', r.prompt);
