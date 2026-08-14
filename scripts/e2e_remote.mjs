@@ -1,5 +1,7 @@
 // Remote E2E against http://38.76.190.150:8787 — full requirements verification.
 // Run from the machine with the ssh secret (or locally, hitting the public URL).
+import zlib from 'node:zlib';
+
 const BASE = 'http://38.76.190.150:8787';
 const KEY = process.env.SAKANA_TEST_KEY || '';
 const AUTH = { authorization: 'Bearer ' + KEY };
@@ -65,10 +67,15 @@ console.log('== R2. basic chat streaming ==');
 
 console.log('== R3. image upload (multimodal) ==');
 {
-  const pngB64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-  // use a bigger real PNG: generate 32x32 red data URL client-side via zlib? Simpler: reuse embedded known-good:
-  // We'll build a 16x16 red PNG via our own code is complex here; use a known base64 of a real red png:
-  const realPng = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAFklEQVR4nGP8z8Dwn4GBgYGBgYGBgQA+pQI1v8vNPQAAAABJRU5ErkJggg==';
+  // Generate a valid 64x64 solid RED RGBA PNG in-process (zlib, no deps)
+    // zlib imported at top
+  function crc32(buf) { let c, table = crc32.table; if (!table) { table = crc32.table = []; for (let n=0;n<256;n++){c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;table[n]=c>>>0;} } let crc=0xFFFFFFFF; for (let i=0;i<buf.length;i++) crc=table[(crc^buf[i])&0xFF]^(crc>>>8); return (crc^0xFFFFFFFF)>>>0; }
+  function chunk(type, data) { const len=Buffer.alloc(4); len.writeUInt32BE(data.length); const t=Buffer.from(type,'ascii'); const crc=Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([t,data]))); return Buffer.concat([len,t,data,crc]); }
+  const w=64,h=64; const ihdr=Buffer.alloc(13); ihdr.writeUInt32BE(w,0); ihdr.writeUInt32BE(h,4); ihdr[8]=8; ihdr[9]=6;
+  const raw=Buffer.alloc((w*4+1)*h);
+  for(let y=0;y<h;y++){ raw[y*(w*4+1)]=0; for(let x=0;x<w;x++){ const o=y*(w*4+1)+1+x*4; raw[o]=255; raw[o+1]=0; raw[o+2]=0; raw[o+3]=255; } }
+  const png=Buffer.concat([Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]), chunk('IHDR',ihdr), chunk('IDAT',zlib.deflateSync(raw)), chunk('IEND',Buffer.alloc(0))]);
+  const realPng = png.toString('base64');
   const r = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: [
     { type: 'text', text: '这张图片是什么颜色?只回答两个字。' },
     { type: 'image_url', image_url: { url: 'data:image/png;base64,' + realPng } },
@@ -76,6 +83,7 @@ console.log('== R3. image upload (multimodal) ==');
   const text = r.text || '';
   ok('image 200', !r.error, JSON.stringify(r).slice(0, 150));
   ok('image answered a color', /红|蓝|绿|白|黑/.test(text), text.slice(0, 80));
+  await sleep(5000); // dodge per-account rate limits
 
   // text file
   const fileData = 'data:text/plain;base64,' + Buffer.from('机密数字 8848').toString('base64');
@@ -84,8 +92,10 @@ console.log('== R3. image upload (multimodal) ==');
     { type: 'file', name: 'secret.txt', mime: 'text/plain', file_url: fileData },
   ] }] });
   ok('file extracted', /8848/.test(rf.text || ''), (rf.text || '').slice(0, 100));
+  await sleep(5000);
 }
 
+await sleep(6000);
 console.log('== R4. conversation continuity (ghost fix) ==');
 {
   const r1 = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: '我叫小李,记住。' }] });
@@ -100,6 +110,7 @@ console.log('== R4. conversation continuity (ghost fix) ==');
   ok('remembered name', /小李/.test(r2.text || ''), (r2.text || '').slice(0, 150));
 }
 
+await sleep(6000);
 console.log('== R5. tool round-trip ==');
 {
   const r1 = await chat({ model: 'sakana-namazu', stream: false, tools: [{ type: 'function', function: { name: 'get_weather', description: '天气' } }], messages: [{ role: 'user', content: '北京天气?调用 get_weather 查' }] });
@@ -113,6 +124,7 @@ console.log('== R5. tool round-trip ==');
   ok('tool result understood', /晴|25/.test(r2.text || ''), (r2.text || '').slice(0, 150));
 }
 
+await sleep(6000);
 console.log('== R6. multi-format endpoints ==');
 {
   const r =  await fetch(BASE + '/v1/completions', { method: 'POST', headers: { 'content-type': 'application/json', ...AUTH }, body: JSON.stringify({ model: 'sakana-namazu', prompt: '回答: legacy', max_tokens: 10 }), signal: AbortSignal.timeout(120000) });
@@ -128,6 +140,7 @@ console.log('== R6. multi-format endpoints ==');
   ok('anthropic 200 + text', r3.ok && !!j3.content?.[0]?.text, JSON.stringify(j3).slice(0, 120));
 }
 
+await sleep(6000);
 console.log('== R7. cache + stats ==');
 {
   const body = { model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: '缓存测试:输出 CACHE-REMOTE-OK' }] };

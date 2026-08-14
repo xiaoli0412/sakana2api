@@ -529,10 +529,14 @@ async function handleAnthropicMessages(req, res) {
 async function makeChatResponse(chatBody) {
   // bind one account to the whole multi-call flow; retry once on account-level errors
   const RETRYABLE = /CONV-NOTFOUND-001|RATE-LIMIT-001|AUTH-LOGIN-001|CF-403|UPSTREAM-TIMEOUT/;
+  // Also pin the account for auto-context continuations (same rule as chat handler).
+  const ctxEntry = firstUserText(chatBody) ? lookupContext(firstUserText(chatBody)) : null;
   for (let attempt = 0; ; attempt++) {
-    const bound = await accountPool.next() || await getSession().catch(() => null);
+    let bound = null;
+    if (ctxEntry && ctxEntry.accountId) bound = accountPool.get(ctxEntry.accountId);
+    if (!bound) bound = await accountPool.next() || await getSession().catch(() => null);
     try {
-      return await als.run({ session: bound }, () => makeChatResponseInner(chatBody));
+      return await als.run({ session: bound, ctxEntry }, () => makeChatResponseInner(chatBody));
     } catch (e) {
       const code = (e && (e.errorCode || e.code)) || '';
       if (attempt === 0 && (!code || RETRYABLE.test(String(code) + ' ' + String(e.message)))) {
@@ -588,8 +592,7 @@ async function makeChatResponseInner(chatBody) {
 
   // Auto-context lookup — same first-user-message key as saveContext.
   if (!conversationId) {
-    const prevUserMsg = firstUserText(body);
-    const found = prevUserMsg ? lookupContext(prevUserMsg) : null;
+    const found = (als.getStore() && als.getStore().ctxEntry) || (firstUserText(body) ? lookupContext(firstUserText(body)) : null);
     if (found) {
       conversationId = found.conversationId;
       lastMessageId = found.lastMessageId || '';
