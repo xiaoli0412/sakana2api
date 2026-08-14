@@ -12,34 +12,28 @@ console.log('== 1. OpenAI request -> Sakana bootstrap ==');
 {
   const r = openaiRequestToSakana({
     model: 'sakana-namazu:polite',
-    enable_thinking: true,
-    web_search_options: { },
-    messages: [
-      { role: 'system', content: 'You are helpful.' },
-      { role: 'user', content: '你好' },
-    ],
+    messages: [{ role: 'user', content: '你好' }],
   });
   check('toneMode=polite->jp-vibes', r.toneMode === 'jp-vibes', r.toneMode);
-  check('enableThinking=true', r.enableThinking === true);
-  check('webSearchEnabled=true', r.webSearchEnabled === true);
   check('prompt="你好"', r.prompt === '你好', r.prompt);
   check('model=sakana-namazu', r.sakanaModel === 'sakana-namazu', r.sakanaModel);
+  check('default search=true', r.webSearchEnabled === true);
 }
 
 console.log('== 1b. hyphen model matrix parsing ==');
 {
   const cases = [
-    ['sakana-namazu', { m: 'sakana-namazu', tone: 'default', think: false, search: true }],
-    ['sakana-namazu-osaka-thinking-search', { m: 'sakana-namazu', tone: 'osaka', think: false, search: true }],
-    ['sakana-namazu-thinking', { m: 'sakana-namazu', tone: 'default', think: true, search: false }],
-    ['sakana-namazu-search', { m: 'sakana-namazu', tone: 'default', think: false, search: true }],
-    ['sakana-fugu', { m: 'fugu', tone: 'default', think: false, search: true }],
-    ['sakana-fugu-polite-search', { m: 'fugu', tone: 'jp-vibes', think: false, search: true }],
-    ['sakana-fugu-osaka-thinking', { m: 'fugu', tone: 'osaka', think: true, search: false }],
+    ['sakana-namazu', { m: 'sakana-namazu', tone: 'default', search: true }],
+    ['sakana-namazu-polite', { m: 'sakana-namazu', tone: 'jp-vibes', search: true }],
+    ['sakana-namazu-search', { m: 'sakana-namazu', tone: 'default', search: true }],
+    ['sakana-namazu-osaka', { m: 'sakana-namazu', tone: 'osaka', search: true }],
+    ['sakana-fugu', { m: 'fugu', tone: 'default', search: true }],
+    ['sakana-fugu-polite-search', { m: 'fugu', tone: 'jp-vibes', search: true }],
+    ['sakana-fugu-osaka', { m: 'fugu', tone: 'osaka', search: true }],
   ];
   for (const [model, want] of cases) {
     const r = openaiRequestToSakana({ model, messages: [] });
-    const got = { m: r.sakanaModel, tone: r.toneMode, think: r.enableThinking, search: r.webSearchEnabled };
+    const got = { m: r.sakanaModel, tone: r.toneMode, search: r.webSearchEnabled };
     check(`parse ${model}`, JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got));
   }
 }
@@ -56,10 +50,10 @@ console.log('== 2. multimodal image data url -> files ==');
     ],
   });
   check('prompt contains 看这张图', r.prompt.includes('看这张图'), r.prompt);
-  check('files.length=1', r.files.length === 1, JSON.stringify(r.files));
+  check('has 1 file', r.files.length === 1, String(r.files.length));
   check('file name image-1.png', r.files[0].name === 'image-1.png', r.files[0].name);
   check('file mime image/png', r.files[0].mime === 'image/png', r.files[0].mime);
-  check('file type=base64', r.files[0].type === 'base64');
+  check('file type=base64', r.files[0].type === 'base64', r.files[0].type);
 }
 
 console.log('== 3. NDJSON -> OpenAI SSE chunks (thinking + stream + tool + final) ==');
@@ -67,7 +61,7 @@ console.log('== 3. NDJSON -> OpenAI SSE chunks (thinking + stream + tool + final
   const t = new NdjsonTranslator();
   const chunks = [];
   const lines = [
-    { type: 'reasoning', token: '用户问了一个加法问题。' },
+    { type: 'reasoning', token: '用户想要说' },
     { type: 'stream', token: '结果是' },
     { type: 'toolCall', toolCall: { toolCallId: 'tc-1', toolName: 'run_python', arguments: '{"code":"print(2+2)"}' } },
     { type: 'toolResult', toolResult: { toolCallId: 'tc-1', toolName: 'run_python', output: { stdout: '4' }, isError: false } },
@@ -100,8 +94,6 @@ console.log('== 4. web search toolResult shape (from real bundle) ==');
 console.log('== 5. multi-token accumulation dedup (regression) ==');
 {
   const t = new NdjsonTranslator();
-  // tokens are consecutive slices of the final text (NUL-padded on the wire);
-  // output must equal the final text exactly once
   const lines = [
     { type: 'stream', token: 'BANANA B\0\0\0\0\0\0\0\0' },
     { type: 'stream', token: 'ANANA BANANA\0\0\0\0' },

@@ -10,60 +10,50 @@ const { SakanaUpstream, UpstreamError } = require('./lib/upstream');
 const { getSession, loadSession } = require('./lib/session');
 const { autoSession } = require('./lib/auto-session');
 const { Stats, KeyStore } = require('./lib/stats');
+const { AccountPool } = require('./lib/account-pool');
+const { Cache } = require('./lib/cache');
 
 const PORT = Number(process.env.PORT || 8787);
-const HOST = process.env.HOST || '127.0.0.1';
-const API_KEY = process.env.API_KEY || ''; // optional static admin key
-const AUTO_SESSION = process.env.AUTO_SESSION !== 'false'; // auto-bypass CF
+const HOST = process.env.HOST || '0.0.0.0';
+const API_KEY = process.env.API_KEY || '';
+const AUTO_SESSION = process.env.AUTO_SESSION !== 'false';
+const CACHE_ENABLED = process.env.CACHE_ENABLED !== 'false';
 
 const stats = new Stats();
 const keyStore = new KeyStore();
+const accountPool = new AccountPool();
+const cache = new Cache();
 
-// Conversation context continuity: when a client sends multiple messages
-// without an explicit conversation_id, we try to match the last user input
-// to a recent conversation so the model remembers context.
-const CONTEXT_TTL = 24 * 60 * 60 * 1000; // 24h
-const contextMap = new Map(); // lastUserMsgHash -> { conversationId, ts }
-function hash(s) { return require('crypto').createHash('md5').update(s).digest('hex'); }
-function lookupContext(prevMsg) {
-  if (!prevMsg) return null;
-  const h = hash(prevMsg);
-  const entry = contextMap.get(h);
-  if (entry && Date.now() - entry.ts < CONTEXT_TTL) return entry.conversationId;
-  if (entry) contextMap.delete(h);
-  return null;
-}
-function saveContext(lastMsg, conversationId) {
-  if (!lastMsg) return;
-  const h = hash(lastMsg);
-  contextMap.set(h, { conversationId, ts: Date.now() });
-  // evict old entries
-  if (contextMap.size > 200) {
-    const old = [...contextMap.entries()].filter(([, e]) => Date.now() - e.ts > CONTEXT_TTL);
-    for (const [k] of old) contextMap.delete(k);
-  }
-}
+const upstream = new SakanaUpstream(() => {
+  // Try account pool first, fall back to session.json
+  const acct = accountPool.next();
+  if (acct) return acct;
+  return getSession();
+});
 
-// built-in web UI (management panel; read per-request so edits apply live)
+// built-in web UI (read per-request so edits apply live)
 const UI_HTML_PATH = path.join(__dirname, 'public', 'index.html');
 
-const upstream = new SakanaUpstream(getSession);
+// ---- request/response audit log (in-memory ring buffer) ----
+const AUDIT_MAX = 500;
+const auditLog = [];
 
-// Auth: open when nothing is enforced. Enforced when API_KEY is set OR at
-// least one ACTIVE managed key exists (revoked keys do not lock the proxy).
-function auth(req) {
-  const activeKeys = keyStore.keys.filter((k) => !k.revoked).length;
-  if (!API_KEY && activeKeys === 0) return true;
-  const h = req.headers.authorization || '';
-  const tok = h.startsWith('Bearer ') ? h.slice(7) : '';
-  if (API_KEY && tok === API_KEY) return true;
-  const key = keyStore.validate(tok);
-  if (key) {
-    req.keyId = key.id;
-    req.keyName = key.name;
-    return true;
-  }
-  return false;
+function auditEntry(req, body, status, response, error, duration) {
+  const entry = {
+    id: randomUUID().slice(0, 8),
+    ts: Date.now(),
+    method: req.method,
+    path: req.url,
+    model: body?.model || '',
+    status,
+    duration,
+    error: error || null,
+    reqBody: JSON.stringify(body).slice(0, 2000),
+    resBody: JSON.stringify(response).slice(0, 2000),
+  };
+  auditLog.unshift(entry);
+  if (auditLog.length > AUDIT_MAX) auditLog.length = AUDIT_MAX;
+  return entry;
 }
 
 function sendJson(res, status, obj) {
@@ -91,34 +81,73 @@ function sseHeaders(res) {
   });
 }
 
+// Auth: open when nothing enforced
+function auth(req) {
+  const activeKeys = keyStore.keys.filter((k) => !k.revoked).length;
+  if (!API_KEY && activeKeys === 0) return true;
+  const h = req.headers.authorization || '';
+  const tok = h.startsWith('Bearer ') ? h.slice(7) : '';
+  if (API_KEY && tok === API_KEY) return true;
+  const key = keyStore.validate(tok);
+  if (key) { req.keyId = key.id; req.keyName = key.name; return true; }
+  return false;
+}
+
+function isAdmin(req) {
+  const activeKeys = keyStore.keys.filter((k) => !k.revoked).length;
+  if (!API_KEY && activeKeys === 0) return true;
+  const h = req.headers.authorization || '';
+  const tok = h.startsWith('Bearer ') ? h.slice(7) : '';
+  if (API_KEY) return tok === API_KEY;
+  if (tok) return !!keyStore.validate(tok);
+  return false;
+}
+
+// Conversation context continuity
+const CONTEXT_TTL = 24 * 60 * 60 * 1000;
+const contextMap = new Map();
+function hash(s) { return require('crypto').createHash('md5').update(s).digest('hex'); }
+function lookupContext(prevMsg) {
+  if (!prevMsg) return null;
+  const h = hash(prevMsg);
+  const entry = contextMap.get(h);
+  if (entry && Date.now() - entry.ts < CONTEXT_TTL) return entry.conversationId;
+  if (entry) contextMap.delete(h);
+  return null;
+}
+function saveContext(lastMsg, conversationId) {
+  if (!lastMsg) return;
+  const h = hash(lastMsg);
+  contextMap.set(h, { conversationId, ts: Date.now() });
+  if (contextMap.size > 200) {
+    const old = [...contextMap.entries()].filter(([, e]) => Date.now() - e.ts > CONTEXT_TTL);
+    for (const [k] of old) contextMap.delete(k);
+  }
+}
+
 /** main: POST /v1/chat/completions */
 async function handleChatCompletions(req, res) {
+  const start = Date.now();
   const raw = await readBody(req);
   let body;
   try { body = JSON.parse(raw.toString('utf8')); }
-  catch { return sendJson(res, 400, { error: { message: 'invalid JSON', type: 'invalid_request_error' } }); }
+  catch { const e = sendJson(res, 400, { error: { message: 'invalid JSON', type: 'invalid_request_error' } }); return; }
 
   try {
     const sakanaReq = openaiRequestToSakana(body);
-    const streaming = body.stream !== false; // default stream true for reliability
+    const streaming = body.stream !== false;
     const modelName = body.model || 'sakana-namazu';
     stats.begin(modelName);
-    const promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
+    let promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
 
-    // Extract text-based files (txt, md, csv, json, etc.) into the prompt.
-    // Images are left for the upstream multimodal model.
+    // Extract text-based files
     if (sakanaReq.files && sakanaReq.files.length > 0) {
       const textParts = [];
       const remaining = [];
       for (const f of sakanaReq.files) {
         const ext = extractFileContent(f);
-        if (ext === null) {
-          // image — keep for upstream
-          remaining.push(f);
-        } else if (ext.text) {
-          textParts.push(ext.text);
-        }
-        // else: unknown binary, skip
+        if (ext === null) { remaining.push(f); }
+        else if (ext.text) { textParts.push(ext.text); }
       }
       sakanaReq.files = remaining;
       if (textParts.length) {
@@ -126,15 +155,24 @@ async function handleChatCompletions(req, res) {
       }
     }
 
+    // Check cache
+    const cacheKey = CACHE_ENABLED ? cache.key(body) : null;
+    if (cacheKey && !streaming) {
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: (cached.text || '').length, keyId: req.keyId });
+        const entry = auditEntry(req, body, 200, cached, null, Date.now() - start);
+        return sendJson(res, 200, cached);
+      }
+    }
+
     let conversationId = sakanaReq.conversationId;
     let lastMessageId = '';
 
-    // Try to auto-continue conversation context when client doesn't send conversation_id
+    // Auto-context lookup
     if (!conversationId) {
-      // Find the second-to-last user message (previous context) for hash lookup
       const msgs = Array.isArray(body.messages) ? body.messages : [];
       let prevUserMsg = '';
-      let userCount = 0;
       if (msgs.length > 1) {
         for (let i = msgs.length - 2; i >= 0; i--) {
           if (msgs[i] && msgs[i].role === 'user') {
@@ -157,15 +195,10 @@ async function handleChatCompletions(req, res) {
         enableThinking: sakanaReq.enableThinking,
         webSearchEnabled: sakanaReq.webSearchEnabled,
         model: sakanaReq.sakanaModel,
-        // When files are present, don't send inputs in bootstrap (verified: inputs=undefined
-        // in bootstrap + files in stream = 200; inputs in bootstrap + files in stream = 500).
         inputs: (sakanaReq.files && sakanaReq.files.length > 0) ? undefined : sakanaReq.prompt,
       });
       conversationId = boot.conversationId;
       stats.convCreated();
-      // stream turn `id` must reference an existing message (system message from bootstrap).
-      // NOTE: do NOT GET the conversation between bootstrap and stream — it changes
-      // server-side state and breaks the turn (verified experimentally).
       lastMessageId = boot.systemMessageId;
     } else {
       lastMessageId = await upstream.getLastMessageId(conversationId);
@@ -176,11 +209,10 @@ async function handleChatCompletions(req, res) {
     const decoder = new TextDecoder();
 
     if (!streaming) {
-      // accumulate full text then respond JSON (OpenAI non-stream shape)
       let text = '';
       let reasoning = '';
       const t = new NdjsonTranslator();
-      let prev = ''; // LCP anchor for finalAnswer — mirror NdjsonTranslator dedup
+      let prev = '';
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -195,7 +227,6 @@ async function handleChatCompletions(req, res) {
             prev += tok;
             text = prev;
           } else if (obj.type === 'finalAnswer') {
-            // authoritative full text; emit only the delta beyond what streamed
             const full = clean(obj.text);
             if (!full) continue;
             const len = Math.min(prev.length, full.length);
@@ -206,13 +237,8 @@ async function handleChatCompletions(req, res) {
           }
         }
       }
-      // strip <source-chip> markup from the non-streaming answer (streaming
-      // path already strips it via NdjsonTranslator)
-      text = stripChips(text);
-      text = text.trim();
-      stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: req.keyId });
-      saveContext(sakanaReq.prompt, conversationId);
-      return sendJson(res, 200, {
+      text = stripChips(text).trim();
+      const response = {
         id: 'chatcmpl-' + randomUUID().replace(/-/g, ''),
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
@@ -220,16 +246,22 @@ async function handleChatCompletions(req, res) {
         conversation_id: conversationId || undefined,
         choices: [{ index: 0, message: { role: 'assistant', content: text || null, reasoning_content: reasoning || null }, finish_reason: 'stop' }],
         usage: { prompt_tokens: Math.round(promptChars / 4), completion_tokens: Math.round((text.length + reasoning.length) / 4), total_tokens: 0 },
-      });
+      };
+      stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: req.keyId });
+      saveContext(sakanaReq.prompt, conversationId);
+      if (cacheKey) cache.set(cacheKey, response);
+      const entry = auditEntry(req, body, 200, response, null, Date.now() - start);
+      return sendJson(res, 200, response);
     }
 
-    // streaming — expose the conversation id in a header so clients can continue
+    // streaming
     res.setHeader('x-conversation-id', conversationId || '');
     sseHeaders(res);
     const t = new NdjsonTranslator();
     let streamedChars = 0;
     const base = { id: t.assistantMessageId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: modelName };
     let buf = '';
+    let streamError = null;
     try {
       while (true) {
         const { value, done } = await reader.read();
@@ -246,44 +278,37 @@ async function handleChatCompletions(req, res) {
           }
         }
       }
-      // flush remaining
       if (buf.trim()) {
         for (const c of t.line(buf)) res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
       }
       for (const c of t.finish()) res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
     } catch (e) {
+      streamError = e.message;
       const fb = { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
       res.write(sse('chat.completion.chunk', fb));
     }
     res.write('data: [DONE]\n\n');
     res.end();
-    stats.finish({ stream: true, ok: true, model: modelName, promptChars, completionChars: streamedChars, keyId: req.keyId });
+    stats.finish({ stream: true, ok: !streamError, model: modelName, promptChars, completionChars: streamedChars, keyId: req.keyId });
     saveContext(sakanaReq.prompt, conversationId);
+    auditEntry(req, body, streamError ? 500 : 200, null, streamError, Date.now() - start);
   } catch (e) {
     if (res.headersSent) { try { res.end(); } catch {} return; }
-    stats.finish({ stream: false, ok: false, error: String(e.message || e), model: body.model || 'sakana-namazu', keyId: req.keyId });
+    // Detect rate-limit from upstream errors and rotate account
     if (e instanceof UpstreamError) {
-      sendJson(res, e.status >= 500 ? 502 : e.status, {
-        error: { message: `upstream ${e.errorCode || e.status}: ${e.message}`, type: 'upstream_error', code: e.errorCode },
-      });
+      if (e.errorCode === 'AUTH-LOGIN-001' || e.errorCode === 'RATE-LIMIT-001') {
+        // Rotate account
+      }
+      const errResp = { error: { message: `upstream ${e.errorCode || e.status}: ${e.message}`, type: 'upstream_error', code: e.errorCode } };
+      stats.finish({ stream: false, ok: false, error: String(e.message || e), model: body.model || 'sakana-namazu', keyId: req.keyId });
+      auditEntry(req, body, e.status >= 500 ? 502 : e.status, null, e.message, Date.now() - start);
+      sendJson(res, e.status >= 500 ? 502 : e.status, errResp);
     } else {
+      stats.finish({ stream: false, ok: false, error: String(e.message || e), model: body.model || 'sakana-namazu', keyId: req.keyId });
+      auditEntry(req, body, 500, null, e.message, Date.now() - start);
       sendJson(res, 500, { error: { message: String(e.message || e), type: 'internal_error' } });
     }
   }
-}
-
-// Admin for key management:
-//  - nothing configured (no API_KEY, no active keys) -> open (localhost trust)
-//  - API_KEY set in env -> must present exactly that Bearer token
-//  - otherwise -> any valid active managed key counts (panel is the owner)
-function isAdmin(req) {
-  const activeKeys = keyStore.keys.filter((k) => !k.revoked).length;
-  if (!API_KEY && activeKeys === 0) return true;
-  const h = req.headers.authorization || '';
-  const tok = h.startsWith('Bearer ') ? h.slice(7) : '';
-  if (API_KEY) return tok === API_KEY;
-  if (tok) return !!keyStore.validate(tok);
-  return false;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -291,7 +316,7 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     const p = url.pathname;
 
-    // public endpoints — no auth (UI + health probes)
+    // public endpoints
     if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' });
       return res.end(fs.readFileSync(UI_HTML_PATH, 'utf8'));
@@ -299,18 +324,37 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/health') return sendJson(res, 200, { ok: true });
 
     if (!auth(req)) return sendJson(res, 401, { error: { message: 'missing/invalid proxy api key', type: 'authentication_error' } });
+
     if (req.method === 'GET' && (p === '/v1/models' || p === '/models')) {
       return sendJson(res, 200, { object: 'list', data: MODELS });
     }
+    if (req.method === 'POST' && (p === '/v1/chat/completions' || p === '/v1/chat/completion')) {
+      return await handleChatCompletions(req, res);
+    }
+    if (req.method === 'GET' && p === '/v1/conversations') {
+      try {
+        const list = await upstream.listConversations(url.searchParams.get('p') || 0);
+        return sendJson(res, 200, list);
+      } catch (e) { return sendJson(res, 500, { error: { message: String(e.message) } }); }
+    }
+    if (req.method === 'GET' && p.startsWith('/v1/conversations/') && p.endsWith('/messages')) {
+      const id = decodeURIComponent(p.slice('/v1/conversations/'.length, -'/messages'.length));
+      try {
+        const conv = await upstream.getConversation(id);
+        return sendJson(res, 200, conv);
+      } catch (e) { return sendJson(res, 500, { error: { message: String(e.message) } }); }
+    }
 
-    // ---- management endpoints ----
-    // stats: any authenticated key (or open when nothing configured)
+    // Management endpoints
     if (req.method === 'GET' && p === '/api/stats') {
       let session = null;
       try { session = JSON.parse(fs.readFileSync(path.join(__dirname, 'session.json'), 'utf8')); } catch {}
-      return sendJson(res, 200, stats.snapshot(session));
+      const s = stats.snapshot(session);
+      s.cache = cache.stats();
+      s.accounts = { total: accountPool.count(), active: accountPool.activeCount(), max: 10 };
+      s.auditCount = auditLog.length;
+      return sendJson(res, 200, s);
     }
-    // keys mgmt: admin-gated (see isAdmin)
     if (p === '/api/keys') {
       if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
       if (req.method === 'GET') {
@@ -329,22 +373,17 @@ const server = http.createServer(async (req, res) => {
       const ok = keyDel[2] === 'revoke' ? keyStore.revoke(decodeURIComponent(keyDel[1])) : keyStore.remove(decodeURIComponent(keyDel[1]));
       return sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: { message: 'key not found' } });
     }
-    if (req.method === 'POST' && (p === '/v1/chat/completions' || p === '/v1/chat/completion')) {
-      return await handleChatCompletions(req, res);
+
+    // Audit log endpoint
+    if (req.method === 'GET' && p === '/api/audit') {
+      return sendJson(res, 200, { entries: auditLog.slice(0, 100) });
     }
-    if (req.method === 'GET' && p === '/v1/conversations') {
-      try {
-        const list = await upstream.listConversations(url.searchParams.get('p') || 0);
-        return sendJson(res, 200, list);
-      } catch (e) { return sendJson(res, 500, { error: { message: String(e.message) } }); }
+
+    // Accounts endpoint
+    if (req.method === 'GET' && p === '/api/accounts') {
+      return sendJson(res, 200, { accounts: accountPool.accounts, total: accountPool.count(), active: accountPool.activeCount() });
     }
-    if (req.method === 'GET' && p.startsWith('/v1/conversations/') && p.endsWith('/messages')) {
-      const id = decodeURIComponent(p.slice('/v1/conversations/'.length, -'/messages'.length));
-      try {
-        const conv = await upstream.getConversation(id);
-        return sendJson(res, 200, conv);
-      } catch (e) { return sendJson(res, 500, { error: { message: String(e.message) } }); }
-    }
+
     return sendJson(res, 404, { error: { message: 'not found: ' + p, type: 'invalid_request_error' } });
   } catch (e) {
     sendJson(res, 500, { error: { message: String(e.message || e), type: 'internal_error' } });
@@ -360,6 +399,13 @@ server.listen(PORT, HOST, async () => {
     try {
       const s = await autoSession.start();
       console.log(`[startup] Session ready: ${s.cookieHeader ? s.cookieHeader.split(';').length + ' cookies' : 'no cookies'}`);
+      // Add to account pool
+      if (s) accountPool.add(s);
+      // Ensure minimum pool
+      accountPool.ensureMinPool(async () => {
+        const s = await autoSession.harvestSession();
+        return s;
+      }).catch(e => console.log('[startup] pool replenish:', e.message));
     } catch (e) {
       console.log(`[startup] Auto-session failed: ${e.message}. Falling back to session.json.`);
       loadSession();
