@@ -103,7 +103,20 @@ function isAdmin(req) {
   return false;
 }
 
-// Conversation context continuity
+/** Mark the session that served the failing request (rate-limit/expiry). */
+function markCurrentSession(err) {
+  const sess = upstream.lastSession;
+  if (!sess) return;
+  if (err && (err.errorCode === 'AUTH-LOGIN-001' || err.errorCode === 'RATE-LIMIT-001')) {
+    if (sess.id) accountPool.markRateLimited(sess.id);
+    else accountPool.markRateLimited(sess.id);
+  }
+  if (err && (err.errorCode === 'CF-403' || err.errorCode === 'AUTH-TOKEN-001')) {
+    if (sess.id) accountPool.markExpired(sess.id);
+  }
+}
+
+// Conversation context continuity (auto-continue: no need to pass conversation_id)
 const CONTEXT_TTL = 24 * 60 * 60 * 1000;
 const contextMap = new Map();
 function hash(s) { return require('crypto').createHash('md5').update(s).digest('hex'); }
@@ -111,18 +124,37 @@ function lookupContext(prevMsg) {
   if (!prevMsg) return null;
   const h = hash(prevMsg);
   const entry = contextMap.get(h);
-  if (entry && Date.now() - entry.ts < CONTEXT_TTL) return entry.conversationId;
+  if (entry && Date.now() - entry.ts < CONTEXT_TTL) return entry;
   if (entry) contextMap.delete(h);
   return null;
 }
-function saveContext(lastMsg, conversationId) {
+function saveContext(lastMsg, conversationId, lastMessageId) {
   if (!lastMsg) return;
   const h = hash(lastMsg);
-  contextMap.set(h, { conversationId, ts: Date.now() });
+  const prev = contextMap.get(h);
+  contextMap.set(h, {
+    conversationId,
+    lastMessageId: lastMessageId || (prev && prev.lastMessageId) || '',
+    ts: Date.now(),
+  });
   if (contextMap.size > 200) {
     const old = [...contextMap.entries()].filter(([, e]) => Date.now() - e.ts > CONTEXT_TTL);
     for (const [k] of old) contextMap.delete(k);
   }
+}
+
+// Raw text of the LAST user message in the request — the stable context key.
+// (NOT the translated prompt: after tool-hint injection sakanaReq.prompt no
+// longer equals the client's user text, which broke auto-continuation.)
+function lastUserText(body) {
+  const msgs = Array.isArray(body.messages) ? body.messages : [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (!m || m.role !== 'user') continue;
+    const c = m.content;
+    return typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => p && (p.text || p.content || '')).join(' ') : '');
+  }
+  return '';
 }
 
 /** main: POST /v1/chat/completions */
@@ -169,7 +201,7 @@ async function handleChatCompletions(req, res) {
     let conversationId = sakanaReq.conversationId;
     let lastMessageId = '';
 
-    // Auto-context lookup
+    // Auto-context lookup (client continues without passing conversation_id)
     if (!conversationId) {
       const msgs = Array.isArray(body.messages) ? body.messages : [];
       let prevUserMsg = '';
@@ -184,8 +216,11 @@ async function handleChatCompletions(req, res) {
       }
       const found = prevUserMsg ? lookupContext(prevUserMsg) : null;
       if (found) {
-        conversationId = found;
-        try { lastMessageId = await upstream.getLastMessageId(conversationId); } catch { conversationId = null; }
+        conversationId = found.conversationId;
+        lastMessageId = found.lastMessageId || '';
+        if (!lastMessageId) {
+          try { lastMessageId = await upstream.getLastMessageId(conversationId); } catch { conversationId = null; }
+        }
       }
     }
 
@@ -248,8 +283,9 @@ async function handleChatCompletions(req, res) {
         usage: { prompt_tokens: Math.round(promptChars / 4), completion_tokens: Math.round((text.length + reasoning.length) / 4), total_tokens: 0 },
       };
       stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: req.keyId });
-      saveContext(sakanaReq.prompt, conversationId);
+      saveContext(lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
       if (cacheKey) cache.set(cacheKey, response);
+      res.setHeader('x-conversation-id', conversationId || '');
       const entry = auditEntry(req, body, 200, response, null, Date.now() - start);
       return sendJson(res, 200, response);
     }
@@ -262,6 +298,7 @@ async function handleChatCompletions(req, res) {
     const base = { id: t.assistantMessageId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: modelName };
     let buf = '';
     let streamError = null;
+    let streamErrCode = null;
     try {
       while (true) {
         const { value, done } = await reader.read();
@@ -281,24 +318,35 @@ async function handleChatCompletions(req, res) {
       if (buf.trim()) {
         for (const c of t.line(buf)) res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
       }
-      for (const c of t.finish()) res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
+      // Empty upstream output = silent failure (user typed, nothing came back).
+      if (!t.sentContent && !streamError) {
+        streamError = 'upstream returned empty response (no content)';
+        streamErrCode = 'EMPTY-RESPONSE';
+      }
+      if (!streamError) {
+        for (const c of t.finish()) res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
+      }
     } catch (e) {
-      streamError = e.message;
-      const fb = { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
-      res.write(sse('chat.completion.chunk', fb));
+      streamError = e.message || String(e);
+      streamErrCode = e.errorCode || 'STREAM-ERROR';
     }
-    res.write('data: [DONE]\n\n');
-    res.end();
-    stats.finish({ stream: true, ok: !streamError, model: modelName, promptChars, completionChars: streamedChars, keyId: req.keyId });
-    saveContext(sakanaReq.prompt, conversationId);
-    auditEntry(req, body, streamError ? 500 : 200, null, streamError, Date.now() - start);
+    if (streamError) {
+      const fb = { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'error' }], error: { message: streamError, type: 'upstream_error', code: streamErrCode } };
+      try { res.write(sse('chat.completion.chunk', fb)); } catch {}
+    }
+    try {
+      res.write('data: [DONE]\n\n');
+      res.end();
+    } catch {}
+    const ok = !streamError;
+    stats.finish({ stream: true, ok, model: modelName, promptChars, completionChars: streamedChars, keyId: req.keyId });
+    saveContext(lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+    auditEntry(req, body, ok ? 200 : 500, null, streamError, Date.now() - start);
   } catch (e) {
     if (res.headersSent) { try { res.end(); } catch {} return; }
-    // Detect rate-limit from upstream errors and rotate account
+    // Detect rate-limit / session-dead errors and rotate the account
     if (e instanceof UpstreamError) {
-      if (e.errorCode === 'AUTH-LOGIN-001' || e.errorCode === 'RATE-LIMIT-001') {
-        // Rotate account
-      }
+      markCurrentSession(e);
       const errResp = { error: { message: `upstream ${e.errorCode || e.status}: ${e.message}`, type: 'upstream_error', code: e.errorCode } };
       stats.finish({ stream: false, ok: false, error: String(e.message || e), model: body.model || 'sakana-namazu', keyId: req.keyId });
       auditEntry(req, body, e.status >= 500 ? 502 : e.status, null, e.message, Date.now() - start);
@@ -309,6 +357,294 @@ async function handleChatCompletions(req, res) {
       sendJson(res, 500, { error: { message: String(e.message || e), type: 'internal_error' } });
     }
   }
+}
+
+/** Legacy OpenAI completions: {model, prompt, max_tokens, stream, temperature} */
+async function handleLegacyCompletions(req, res) {
+  let body;
+  try {
+    body = JSON.parse((await readBody(req)).toString('utf8'));
+    if (body.prompt === undefined && body.input === undefined) throw new Error('missing prompt');
+  } catch (e) {
+    return sendJson(res, 400, { error: { message: 'invalid JSON or missing prompt: ' + e.message, type: 'invalid_request_error' } });
+  }
+  // Normalize into chat.completions and translate back to legacy output.
+  const chatBody = {
+    ...body,
+    messages: [{ role: 'user', content: Array.isArray(body.prompt) ? body.prompt.map(String).join('\n') : String(body.prompt ?? body.input) }],
+  };
+  delete chatBody.prompt;
+  delete chatBody.completion;
+  const stream = body.stream === true;
+  const reader = await makeChatResponse(chatBody);
+  if (stream) {
+    sseHeaders(res);
+    for await (const c of reader) res.write(sse(c.event || 'chat.completion.chunk', c.data));
+    return res.end('data: [DONE]\n\n');
+  }
+  return sendJson(res, 200, {
+    id: 'cmpl-' + randomUUID().replace(/-/g, ''),
+    object: 'text_completion',
+    created: Math.floor(Date.now() / 1000),
+    model: chatBody.model || 'sakana-namazu',
+    choices: [{ index: 0, text: reader.content || '', finish_reason: 'stop' }],
+    usage: { prompt_tokens: reader.promptTokens || 0, completion_tokens: reader.completionTokens || 0, total_tokens: (reader.promptTokens || 0) + (reader.completionTokens || 0) },
+  });
+}
+
+/** Responses API (simplified): {model, input, instructions, stream, tools} */
+async function handleResponses(req, res) {
+  let body;
+  try { body = JSON.parse((await readBody(req)).toString('utf8')); }
+  catch { return sendJson(res, 400, { error: { message: 'invalid JSON', type: 'invalid_request_error' } }); }
+  if (body.input === undefined && (body.messages === undefined || body.messages === null)) {
+    return sendJson(res, 400, { error: { message: 'missing input', type: 'invalid_request_error' } });
+  }
+  const chatBody = {
+    ...body,
+    // input may be a string or array of messages; instructions become a system message
+    messages: [
+      ...(body.instructions ? [{ role: 'system', content: body.instructions }] : []),
+      ...(Array.isArray(body.input) ? body.input : [{ role: 'user', content: String(body.input ?? '') }]),
+    ],
+  };
+  delete chatBody.input;
+  delete chatBody.instructions;
+  delete chatBody.output;
+  delete chatBody.tool_choice;
+  delete chatBody.parallel_tool_calls;
+  const stream = body.stream === true;
+  const reader = await makeChatResponse(chatBody);
+  if (stream) {
+    // Emit OpenAI response-format chunks (response.output_text.delta) for compat.
+    sseHeaders(res);
+    for await (const c of reader) {
+      if (c.event === 'chat.completion.chunk') {
+        const d = c.data?.choices?.[0]?.delta?.content;
+        if (d) res.write(sse('response.output_text.delta', { type: 'response.output_text.delta', delta: d, item_id: 'msg_' + randomUUID().slice(0, 6) }));
+        if (c.data?.choices?.[0]?.finish_reason) res.write(sse('response.completed', { type: 'response.completed', response: { id: 'resp_' + randomUUID().slice(0, 6), status: 'completed', output: [] } }));
+      }
+    }
+    return res.end('data: [DONE]\n\n');
+  }
+  const text = reader.content || '';
+  return sendJson(res, 200, {
+    id: 'resp_' + randomUUID().replace(/-/g, '').slice(0, 12),
+    object: 'response',
+    created_at: Math.floor(Date.now() / 1000),
+    status: 'completed',
+    model: chatBody.model || 'sakana-namazu',
+    output: [{ id: 'msg_' + randomUUID().slice(0, 8), type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text }] }],
+    usage: { input_tokens: reader.promptTokens || 0, output_tokens: reader.completionTokens || 0, total_tokens: (reader.promptTokens || 0) + (reader.completionTokens || 0) },
+    conversation_id: reader.conversationId || undefined,
+  });
+}
+
+/** Anthropic Messages API (basic): {model, system, messages, max_tokens, stream} */
+async function handleAnthropicMessages(req, res) {
+  let body;
+  try { body = JSON.parse((await readBody(req)).toString('utf8')); }
+  catch { return sendJson(res, 400, { error: { message: 'invalid JSON', type: 'invalid_request_error' } }); }
+  const chatBody = {
+    ...body,
+    messages: [
+      ...(body.system ? [{ role: 'system', content: Array.isArray(body.system) ? body.system.map(s => s.text || s).join('\n') : String(body.system) }] : []),
+      ...(Array.isArray(body.messages) ? body.messages : [{ role: 'user', content: String(body.messages ?? '') }]),
+    ],
+  };
+  delete chatBody.system;
+  const stream = body.stream === true;
+  const reader = await makeChatResponse(chatBody);
+  if (stream) {
+    sseHeaders(res);
+    for await (const c of reader) {
+      if (c.event === 'chat.completion.chunk') {
+        const d = c.data?.choices?.[0]?.delta?.content;
+        if (d) res.write(`data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: d } })}\n\n`);
+        if (c.data?.choices?.[0]?.finish_reason) {
+          res.write(`data: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: {} })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
+        }
+      }
+    }
+    return res.end('data: [DONE]\n\n');
+  }
+  return sendJson(res, 200, {
+    id: 'msg_' + randomUUID().replace(/-/g, '').slice(0, 12),
+    type: 'message',
+    role: 'assistant',
+    model: chatBody.model || 'sakana-namazu',
+    content: reader.content ? [{ type: 'text', text: reader.content }] : [],
+    stop_reason: 'end_turn',
+    usage: { input_tokens: reader.promptTokens || 0, output_tokens: reader.completionTokens || 0 },
+  });
+}
+
+/**
+ * Run chat/completions and return { content, reasoning, conversationId,
+ * promptTokens, completionTokens } or an AsyncGenerator of SSE chunks when stream.
+ */
+async function makeChatResponse(chatBody) {
+  const start = Date.now();
+  const raw = JSON.stringify(chatBody);
+  let body;
+  try { body = JSON.parse(raw); } catch { throw new Error('bad chat body'); }
+
+  // auto-stream: for legacy/responses we must decide immediately, so force non-stream here
+  // unless the caller wants raw SSE (handled below).
+  const sakanaReq = openaiRequestToSakana(body);
+  const modelName = body.model || 'sakana-namazu';
+  const streaming = body.stream === true ? true : false;
+  stats.begin(modelName);
+  let promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
+
+  // Extract text-based files
+  if (sakanaReq.files && sakanaReq.files.length > 0) {
+    const textParts = [];
+    const remaining = [];
+    for (const f of sakanaReq.files) {
+      const ext = extractFileContent(f);
+      if (ext === null) { remaining.push(f); }
+      else if (ext.text) { textParts.push(ext.text); }
+    }
+    sakanaReq.files = remaining;
+    if (textParts.length) {
+      sakanaReq.prompt = (sakanaReq.prompt || '') + '\n\n--- 文件内容 ---\n' + textParts.join('\n');
+    }
+  }
+
+  const cacheKey = CACHE_ENABLED ? cache.key(body) : null;
+  if (cacheKey && !streaming) {
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: (cached.text || '').length, keyId: null });
+      return { content: cached.choices?.[0]?.message?.content || '', reasoning: cached.choices?.[0]?.message?.reasoning_content || '', conversationId: cached.conversation_id, promptTokens: 0, completionTokens: 0 };
+    }
+  }
+
+  let conversationId = sakanaReq.conversationId;
+  let lastMessageId = '';
+
+  // Auto-context lookup
+  if (!conversationId) {
+    const msgs = Array.isArray(body.messages) ? body.messages : [];
+    let prevUserMsg = '';
+    if (msgs.length > 1) {
+      for (let i = msgs.length - 2; i >= 0; i--) {
+        if (msgs[i] && msgs[i].role === 'user') {
+          const c = msgs[i].content;
+          prevUserMsg = typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => p.text || '').join(' ') : '');
+          break;
+        }
+      }
+    }
+    const found = prevUserMsg ? lookupContext(prevUserMsg) : null;
+    if (found) {
+      conversationId = found.conversationId;
+      lastMessageId = found.lastMessageId || '';
+      if (!lastMessageId) {
+        try { lastMessageId = await upstream.getLastMessageId(conversationId); } catch { conversationId = null; }
+      }
+    }
+  }
+
+  if (!conversationId) {
+    const boot = await upstream.createConversation({
+      toneMode: sakanaReq.toneMode,
+      enableThinking: sakanaReq.enableThinking,
+      webSearchEnabled: sakanaReq.webSearchEnabled,
+      model: sakanaReq.sakanaModel,
+      inputs: (sakanaReq.files && sakanaReq.files.length > 0) ? undefined : sakanaReq.prompt,
+    });
+    conversationId = boot.conversationId;
+    stats.convCreated();
+    lastMessageId = boot.systemMessageId;
+  } else {
+    lastMessageId = await upstream.getLastMessageId(conversationId);
+  }
+
+  const upResp = await upstream.streamGenerate(conversationId, sakanaReq, { lastMessageId });
+  const reader = upResp.body.getReader();
+  const decoder = new TextDecoder();
+  const t = new NdjsonTranslator();
+
+  if (streaming) {
+    // Return SSE chunk generator, mirroring chat path but as async iterable.
+    const base = { id: t.assistantMessageId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: modelName };
+    return (async function* () {
+      let buf = '';
+      let streamError = null;
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop() || '';
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            for (const c of t.line(line)) {
+              yield { event: 'chat.completion.chunk', data: { ...base, choices: c.choices } };
+            }
+          }
+        }
+        if (buf.trim()) {
+          for (const c of t.line(buf)) yield { event: 'chat.completion.chunk', data: { ...base, choices: c.choices } };
+        }
+        if (!t.sentContent) {
+          streamError = 'empty response';
+          const fb = { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'error' }], error: { message: 'empty upstream response', code: 'EMPTY-RESPONSE' } };
+          yield { event: 'chat.completion.chunk', data: fb };
+        }
+        for (const c of t.finish()) yield { event: 'chat.completion.chunk', data: { ...base, choices: c.choices } };
+      } catch (e) {
+        const fb = { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'error' }], error: { message: String(e.message || e), code: 'STREAM-ERROR' } };
+        yield { event: 'chat.completion.chunk', data: fb };
+      }
+      stats.finish({ stream: true, ok: !streamError, model: modelName, promptChars, completionChars: 0, keyId: null });
+      saveContext(lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+      auditEntry({ method: 'POST', url: '/v1/responses', headers: {} }, body, streamError ? 500 : 200, null, streamError, Date.now() - start);
+    })();
+  }
+
+  // non-stream: accumulate
+  let text = '';
+  let reasoning = '';
+  let prev = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    const s = decoder.decode(value, { stream: true });
+    for (const line of s.split('\n')) {
+      if (!line.trim()) continue;
+      let obj; try { obj = JSON.parse(line); } catch { continue; }
+      if (obj.type === 'reasoning') reasoning += clean(obj.token);
+      else if (obj.type === 'stream') {
+        const tok = clean(obj.token);
+        if (!tok) continue;
+        prev += tok;
+        text = prev;
+      } else if (obj.type === 'finalAnswer') {
+        const full = clean(obj.text);
+        if (!full) continue;
+        if (full.startsWith(text)) text = full;
+        else {
+          const len = Math.min(prev.length, full.length);
+          let i = 0;
+          while (i < len && prev[i] === full[i]) i++;
+          text = prev + full.slice(i);
+          prev = text;
+        }
+      }
+    }
+  }
+  text = stripChips(text).trim();
+  const promptTokens = Math.round(promptChars / 4);
+  const completionTokens = Math.round((text.length + reasoning.length) / 4);
+  stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: null });
+  saveContext(lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+  const entry = auditEntry({ method: 'POST', url: '/v1/responses', headers: {} }, body, 200, { content: text.slice(0, 200) }, null, Date.now() - start);
+  return { content: text, reasoning, conversationId, promptTokens, completionTokens };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -330,6 +666,18 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && (p === '/v1/chat/completions' || p === '/v1/chat/completion')) {
       return await handleChatCompletions(req, res);
+    }
+    // Legacy completions: {model, prompt, max_tokens, stream, temperature}
+    if (req.method === 'POST' && (p === '/v1/completions' || p === '/completions')) {
+      return await handleLegacyCompletions(req, res);
+    }
+    // Responses API (simplified): {model, input, stream, instructions, tools}
+    if (req.method === 'POST' && (p === '/v1/responses' || p === '/responses')) {
+      return await handleResponses(req, res);
+    }
+    // Anthropic-style /v1/messages (basic mapping)
+    if (req.method === 'POST' && (p === '/v1/messages' || p === '/messages')) {
+      return await handleAnthropicMessages(req, res);
     }
     if (req.method === 'GET' && p === '/v1/conversations') {
       try {
@@ -386,6 +734,10 @@ const server = http.createServer(async (req, res) => {
 
     return sendJson(res, 404, { error: { message: 'not found: ' + p, type: 'invalid_request_error' } });
   } catch (e) {
+    if (res.headersSent) {
+      try { res.end(); } catch {}
+      return;
+    }
     sendJson(res, 500, { error: { message: String(e.message || e), type: 'internal_error' } });
   }
 });
@@ -399,13 +751,20 @@ server.listen(PORT, HOST, async () => {
     try {
       const s = await autoSession.start();
       console.log(`[startup] Session ready: ${s.cookieHeader ? s.cookieHeader.split(';').length + ' cookies' : 'no cookies'}`);
-      // Add to account pool
+      // Add to account pool (deduped by uid/email)
       if (s) accountPool.add(s);
-      // Ensure minimum pool
+      console.log(`[account-pool] pool: ${accountPool.count()} accounts (${accountPool.activeCount()} active)`);
+      // Replenish to MIN_POOL with FRESH accounts (distinct email per account)
       accountPool.ensureMinPool(async () => {
-        const s = await autoSession.harvestSession();
+        const s = await autoSession.harvestSession({ fresh: true });
         return s;
       }).catch(e => console.log('[startup] pool replenish:', e.message));
+      // Background: refresh cookies / replace dead accounts continuously
+      accountPool.startBackground({
+        harvestFn: async () => autoSession.harvestSession({ fresh: true }),
+        refreshFn: (acct) => autoSession.refreshAccount(acct),
+      });
+      console.log('[account-pool] background keeper started (every', String(process.env.ACCOUNT_REFRESH_MS || '20min'), ')');
     } catch (e) {
       console.log(`[startup] Auto-session failed: ${e.message}. Falling back to session.json.`);
       loadSession();

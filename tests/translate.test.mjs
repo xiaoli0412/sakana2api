@@ -109,4 +109,63 @@ console.log('== 5. multi-token accumulation dedup (regression) ==');
   check('multi-token stream emits final text exactly once', out === 'BANANA BANANA BANANA', JSON.stringify(out));
 }
 
+console.log('== 6. tool-role message round-trip (external framework) ==');
+{
+  const r = openaiRequestToSakana({
+    model: 'sakana-namazu',
+    messages: [
+      { role: 'user', content: '北京天气?' },
+      { role: 'assistant', content: '我查一下' },
+      { role: 'tool', name: 'get_weather', tool_call_id: 'call_1', content: '{"weather":"晴"}' },
+    ],
+  });
+  check('tool turn detected', r.isToolTurn === true);
+  check('tool turn isContinue', r.isContinue === true);
+  check('tool result embedded in prompt', /晴/.test(r.prompt) && /get_weather/.test(r.prompt), r.prompt.slice(0, 120));
+  check('original user text kept', /北京天气/.test(r.prompt), r.prompt.slice(0, 120));
+}
+
+console.log('== 7. multiple request shapes ==');
+{
+  const a = openaiRequestToSakana({ model: 'sakana-namazu', input: 'hello via input' });
+  check('body.input string → prompt', a.prompt === 'hello via input', a.prompt);
+  const b = openaiRequestToSakana({ model: 'sakana-namazu', input: [{ role: 'user', content: 'via array' }] });
+  check('body.input array → prompt', b.prompt === 'via array', b.prompt);
+  const c = openaiRequestToSakana({ model: 'sakana-namazu', prompt: 'legacy prompt here' });
+  check('legacy body.prompt → prompt', c.prompt === 'legacy prompt here', c.prompt);
+  const d = openaiRequestToSakana({ model: 'sakana-namazu', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'responses style' }] }] });
+  check('responses-style input_text → prompt', d.prompt === 'responses style', d.prompt);
+}
+
+console.log('== 8. tool-hint injection gated by TOOL_PROMPT env ==');
+{
+  const body = { model: 'sakana-namazu', tools: [{ type: 'function', function: { name: 'get_weather', description: '天气' } }], messages: [{ role: 'user', content: 'x' }] };
+  const withHint = openaiRequestToSakana(body);
+  check('tool hint injected by default', /可用工具/.test(withHint.prompt), withHint.prompt.slice(0, 100));
+  const prev = process.env.TOOL_PROMPT;
+  process.env.TOOL_PROMPT = '0';
+  const without = openaiRequestToSakana(body);
+  check('tool hint off when TOOL_PROMPT=0', !/可用工具/.test(without.prompt));
+  if (prev === undefined) delete process.env.TOOL_PROMPT; else process.env.TOOL_PROMPT = prev;
+}
+
+console.log('== 9. finalAnswer incremental delta on repeated events ==');
+{
+  const t = new NdjsonTranslator();
+  let out = '';
+  const events = [
+    { type: 'stream', token: 'HELLO\0\0' },
+    { type: 'finalAnswer', text: 'HELLO WORLD\0' },
+    { type: 'finalAnswer', text: 'HELLO WORLD AGAIN\0' },
+  ];
+  for (const e of events) {
+    for (const c of t.line(JSON.stringify(e))) {
+      const d = c.choices[0].delta;
+      if (d.content) out += d.content;
+    }
+  }
+  check('finalAnswer deltas accumulate to full text', out === 'HELLO WORLD AGAIN', JSON.stringify(out));
+  check('no chunk after final complete (dedup)', t.line(JSON.stringify({ type: 'finalAnswer', text: 'HELLO WORLD AGAIN' })).length === 0);
+}
+
 process.exit(failures ? 1 : 0);
