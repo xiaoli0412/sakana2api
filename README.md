@@ -152,17 +152,20 @@ for chunk in resp:
 
 ### `GET /v1/models`
 
-模型列表:
+12 个模型(2 模型 × 3 风格 × 2 后缀,连字符格式):
 
 | 模型 ID | 说明 |
 |---------|------|
-| `sakana-namazu` | 默认 Namazu(Standard 🐟) |
-| `sakana-namazu:standard` | 风格: Standard 🐟 (`toneMode: default`) |
-| `sakana-namazu:polite` | 风格: Polite 🐠 (`toneMode: jp-vibes`) |
-| `sakana-namazu:osaka` | 风格: Osaka 🐙 (`toneMode: osaka`) |
+| `sakana-namazu` | Namazu · Standard 🐟 · 默认(思考+搜索) |
+| `sakana-namazu-search` | Namazu · Standard 🐟 · 显式搜索 |
+| `sakana-namazu-polite` | Namazu · Polite 🐠 · 默认 |
+| `sakana-namazu-polite-search` | Namazu · Polite 🐠 · 显式搜索 |
+| `sakana-namazu-osaka` | Namazu · Osaka 🐙 · 默认 |
+| `sakana-namazu-osaka-search` | Namazu · Osaka 🐙 · 显式搜索 |
+| `sakana-fugu` … | Fugu · 同上 6 种组合 |
 
-> 注: Sakana 后端当前仅接受 `default` / `jp-vibes` / `osaka` 三种 toneMode,
-> 其余值(如 `neutral`、`polite`)返回 `INPUT-REQ-001`。代理层会自动完成映射。
+> 思考链是模型**天生自带**的(任何对话都会产生 reasoning_content),无需单独开关;
+> 后缀仅控制是否显式启用 Web 搜索。旧冒号格式(`sakana-namazu:polite`)仍兼容。
 
 ### `POST /v1/chat/completions`
 
@@ -171,28 +174,49 @@ for chunk in resp:
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `model` | string | 模型 ID |
-| `messages` | array | 消息列表 |
-| `stream` | bool | 是否流式 |
-| `temperature` | number | (已忽略) |
-| `max_tokens` | number | (已忽略) |
+| `messages` | array | 消息列表(支持 `user` / `assistant` / `tool` / `system`) |
+| `stream` | bool | 默认 `true`(SSE) |
+| `tools` | array | 声明自定义工具(注入工具提示,模型可 JSON 形式调用) |
+| `conversation_id` | string | 续聊已有会话(不传则自动识别上下文) |
 
 **Sakana 扩展参数:**
 
 | 参数 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `thinking` | bool | `false` | 启用思维链(reasoning_content) |
-| `web_search` | bool | `false` | 启用 Web 搜索 |
+| `web_search` | bool | `true` | 是否启用 Web 搜索 |
 | `style` | string | `"default"` | 覆盖风格: `standard`, `polite`, `osaka` |
-| `conversation_id` | string | – | 续聊已有会话 |
 
 **响应增强字段:**
 
 | 字段 | 出现位置 | 格式 |
 |------|----------|------|
-| `conversation_id` | 非流式 JSON / `x-conversation-id` 响应头(流式) | string |
+| `conversation_id` | 非流式 JSON / `x-conversation-id` 响应头 | string |
 | `reasoning_content` | SSE delta / 非流式 message | string |
 | `tool_calls` | SSE delta | `[{id, type, function:{name, arguments}}]` |
 | `citations` | 最后一个 SSE chunk | `[{title, url}]` |
+
+### `POST /v1/completions`(legacy)
+
+OpenAI 旧版补全格式:`{ model, prompt, max_tokens, stream }`
+响应为 `text_completion` 结构(`choices[0].text`)。
+
+### `POST /v1/responses`(Responses API 简化)
+
+OpenAI Responses 格式:`{ model, input|instructions|tools, stream }`
+`input` 支持字符串 / 消息数组 / `{type:"message",...}` 对象。
+非流式返回 `{ object:"response", output:[{type:"message",…}] }`;
+
+### `POST /v1/messages`(Anthropic 兼容)
+
+Anthropic Messages 格式:`{ model, system, messages, max_tokens, stream }`
+返回 `{ type:"message", content:[{type:"text",…}] }`。
+
+### 文件与图片上传
+
+`messages` 内容数组支持:
+- `{ type: "image_url", image_url: { url: "data:image/png;base64,…" } }` — 图片(多模态)
+- `{ type: "file", name, mime, file_url: "data:…" }` — 文本类文件自动提取进提示词(py/js/md/txt/csv/json 等 50+ 格式,上限 50KB),图片/音频走多模态
+- 远程 URL(`https://…`)自动下载
 
 ---
 
@@ -216,7 +240,7 @@ sakana-2api/
 │   ├── upload_files.py # 服务器热更新脚本 (凭据在 gitignored .ssh_secret.json)
 │   └── verify_remote.py     # 部署后远程验证套件
 ├── tests/
-│   └── translate.test.mjs  # 19 项单元测试
+│   └── translate.test.mjs  # 38 项单元测试 (模型矩阵/工具回合/多格式/增量去重)
 ├── protocol.md         # 📗 逆向协议文档
 └── README.md           # 本文件
 ```
@@ -229,6 +253,15 @@ sakana-2api/
 | `HOST` | `127.0.0.1` | 监听地址(公网部署设为 `0.0.0.0` + 设置 API_KEY) |
 | `API_KEY` | – | 静态管理密钥(Bearer)。设置后密钥面板需用它解锁;未设置时面板直开 |
 | `AUTO_SESSION` | `true` | `false` 时走手动 session.json(不启动浏览器) |
+| `ACCOUNT_POOL_MIN` | `10` | 账户池最低活跃数(自动收割保持) |
+| `ACCOUNT_POOL_MAX` | `10` | 账户池上限 |
+| `ACCOUNT_REFRESH_MS` | `1200000` | 后台账户刷新/补充周期(20 分钟,cf_clearance TTL 内) |
+| `CACHE_ENABLED` | `true` | 请求缓存开关 |
+| `CACHE_HIT_RATE` | `0.93` | 缓存命中率(0–1,可调 0.90/0.95) |
+| `CACHE_TTL` | `60000` | 缓存 TTL(ms) |
+| `UPSTREAM_TIMEOUT_MS` | `300000` | 上游生成超时(ms) |
+| `UPSTREAM_BOOTSTRAP_MS` | `60000` | 上游建会话超时(ms) |
+| `TOOL_PROMPT` | `1` | `0` 时关闭自定义工具提示注入 |
 | `SAKANA_BASE` | `https://chat.sakana.ai` | 上游地址(测试用) |
 
 **鉴权模式(三态):**
@@ -246,15 +279,20 @@ sakana-2api/
 
 ## ⚠️ 注意事项
 
-- **自动模式**: 首次启动需 60–120 秒(过盾 + 收信 + 登录)。之后每 20 分钟自动刷新
-  会话,重启复用 `.browser-profile/`(登录态持久化)。
-- **临时邮箱**: 每个新用户一个 mail.tm 临时邮箱,免费额度绑定账号
-  (Namazu $12.5/天、Fugu $6.25/周)。需要长久会话可手动登录后复用 Profile。
-- **多轮对话**: 非流式响应返回 `conversation_id`,流式见 `x-conversation-id` 头。
-  续聊时传 `conversation_id` 参数。
-- **thinking + web_search 兼容性**: 某些组合可能受服务端限制(`INPUT-MODE-001`)。
-- **文件上传**: 首轮图片会自动走空 bootstrap → stream(files) 流程。
-- **工具调用**: Sakana 后端**自动执行工具**(`run_python`/`run_command`/`search`),无需客户端回传。
+- **自动模式**: 首次启动需 60–120 秒(过盾 + 收信 + 登录)。账户池会在后台持续
+  收割**独立邮箱的新账户**并保持 10 个活跃账户,每 20 分钟刷新 cookie,失败自动替换。
+- **临时邮箱**: 每个新账户一个 mail.tm 临时邮箱(独立账号),免费额度绑定账号
+  (Namazu $12.5/天、Fugu $6.25/周)。
+- **多轮对话**: 自动上下文续接(无需传 conversation_id,按首条 user 消息自动绑定
+  同一会话与同一上游账户);也可显式传 `conversation_id`。流式响应头带
+  `x-conversation-id`。
+- **工具调用(外部框架)**: 客户端可声明 `tools` 并自行执行,然后把结果作为
+  `role:"tool"` 消息回传,代理会把它交给模型继续生成(标准 OpenAI 工具回路)。
+  Sakana 侧原生工具(search/python/command)由上游自动执行并透传 `tool_calls` 增量。
+- **图片上传**: 代理把图片以 `type=base64` 文件名格式上传,上游服务端负责
+  base64 解码(send 原始字节会导致文件损坏,已修复)。多模态识别由上游模型完成。
+- **静默失败**: 上游超时/空响应/中断均以 SSE `finish_reason:"error"` 或 JSON 错误
+  上报,并记入审计日志,不再假装成功。
 - **编码**: 确保终端支持 UTF-8。Windows 推荐在 Git Bash 或 VSCode 终端中运行。
 
 ---
