@@ -2,23 +2,43 @@
 // Run: node server.js   (PORT=8787 SAKANA_SESSION_FILE=session.json)
 
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { randomUUID } = require('crypto');
 const { MODELS, openaiRequestToSakana, NdjsonTranslator, sse, clean, stripChips } = require('./lib/translate');
 const { SakanaUpstream, UpstreamError } = require('./lib/upstream');
 const { getSession, loadSession } = require('./lib/session');
 const { autoSession } = require('./lib/auto-session');
+const { Stats, KeyStore } = require('./lib/stats');
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
-const API_KEY = process.env.API_KEY || ''; // optional bearer gate for the proxy itself
+const API_KEY = process.env.API_KEY || ''; // optional static admin key
 const AUTO_SESSION = process.env.AUTO_SESSION !== 'false'; // auto-bypass CF
+
+const stats = new Stats();
+const keyStore = new KeyStore();
+
+// built-in web UI (management panel; read per-request so edits apply live)
+const UI_HTML_PATH = path.join(__dirname, 'public', 'index.html');
 
 const upstream = new SakanaUpstream(getSession);
 
+// Auth: open when nothing is enforced. Enforced when API_KEY is set OR at
+// least one ACTIVE managed key exists (revoked keys do not lock the proxy).
 function auth(req) {
-  if (!API_KEY) return true;
+  const activeKeys = keyStore.keys.filter((k) => !k.revoked).length;
+  if (!API_KEY && activeKeys === 0) return true;
   const h = req.headers.authorization || '';
-  return h === 'Bearer ' + API_KEY || h === 'Bearer ' + API_KEY.trim();
+  const tok = h.startsWith('Bearer ') ? h.slice(7) : '';
+  if (API_KEY && tok === API_KEY) return true;
+  const key = keyStore.validate(tok);
+  if (key) {
+    req.keyId = key.id;
+    req.keyName = key.name;
+    return true;
+  }
+  return false;
 }
 
 function sendJson(res, status, obj) {
@@ -56,6 +76,9 @@ async function handleChatCompletions(req, res) {
   try {
     const sakanaReq = openaiRequestToSakana(body);
     const streaming = body.stream !== false; // default stream true for reliability
+    const modelName = body.model || 'sakana-namazu';
+    stats.begin(modelName);
+    const promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
 
     let conversationId = sakanaReq.conversationId;
     let lastMessageId = '';
@@ -70,6 +93,7 @@ async function handleChatCompletions(req, res) {
         inputs: (sakanaReq.files && sakanaReq.files.length > 0) ? undefined : sakanaReq.prompt,
       });
       conversationId = boot.conversationId;
+      stats.convCreated();
       // stream turn `id` must reference an existing message (system message from bootstrap).
       // NOTE: do NOT GET the conversation between bootstrap and stream — it changes
       // server-side state and breaks the turn (verified experimentally).
@@ -117,14 +141,15 @@ async function handleChatCompletions(req, res) {
       // path already strips it via NdjsonTranslator)
       text = stripChips(text);
       text = text.trim();
+      stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: req.keyId });
       return sendJson(res, 200, {
         id: 'chatcmpl-' + randomUUID().replace(/-/g, ''),
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
-        model: body.model || 'sakana-namazu',
+        model: modelName,
         conversation_id: conversationId || undefined,
         choices: [{ index: 0, message: { role: 'assistant', content: text || null, reasoning_content: reasoning || null }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        usage: { prompt_tokens: Math.round(promptChars / 4), completion_tokens: Math.round((text.length + reasoning.length) / 4), total_tokens: 0 },
       });
     }
 
@@ -132,7 +157,7 @@ async function handleChatCompletions(req, res) {
     res.setHeader('x-conversation-id', conversationId || '');
     sseHeaders(res);
     const t = new NdjsonTranslator();
-    const modelName = body.model || 'sakana-namazu';
+    let streamedChars = 0;
     const base = { id: t.assistantMessageId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: modelName };
     let buf = '';
     try {
@@ -145,6 +170,8 @@ async function handleChatCompletions(req, res) {
         for (const line of lines) {
           if (!line.trim()) continue;
           for (const c of t.line(line)) {
+            const d = c.choices[0] && c.choices[0].delta;
+            if (d && d.content) streamedChars += d.content.length;
             res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
           }
         }
@@ -160,8 +187,10 @@ async function handleChatCompletions(req, res) {
     }
     res.write('data: [DONE]\n\n');
     res.end();
+    stats.finish({ stream: true, ok: true, model: modelName, promptChars, completionChars: streamedChars, keyId: req.keyId });
   } catch (e) {
     if (res.headersSent) { try { res.end(); } catch {} return; }
+    stats.finish({ stream: false, ok: false, error: String(e.message || e), model: body.model || 'sakana-namazu', keyId: req.keyId });
     if (e instanceof UpstreamError) {
       sendJson(res, e.status >= 500 ? 502 : e.status, {
         error: { message: `upstream ${e.errorCode || e.status}: ${e.message}`, type: 'upstream_error', code: e.errorCode },
@@ -172,15 +201,62 @@ async function handleChatCompletions(req, res) {
   }
 }
 
+// Admin for key management:
+//  - nothing configured (no API_KEY, no active keys) -> open (localhost trust)
+//  - API_KEY set in env -> must present exactly that Bearer token
+//  - otherwise -> any valid active managed key counts (panel is the owner)
+function isAdmin(req) {
+  const activeKeys = keyStore.keys.filter((k) => !k.revoked).length;
+  if (!API_KEY && activeKeys === 0) return true;
+  const h = req.headers.authorization || '';
+  const tok = h.startsWith('Bearer ') ? h.slice(7) : '';
+  if (API_KEY) return tok === API_KEY;
+  if (tok) return !!keyStore.validate(tok);
+  return false;
+}
+
 const server = http.createServer(async (req, res) => {
   try {
-    if (!auth(req)) return sendJson(res, 401, { error: { message: 'missing/invalid proxy api key', type: 'authentication_error' } });
-
     const url = new URL(req.url, 'http://x');
     const p = url.pathname;
 
+    // public endpoints — no auth (UI + health probes)
+    if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' });
+      return res.end(fs.readFileSync(UI_HTML_PATH, 'utf8'));
+    }
+    if (req.method === 'GET' && p === '/health') return sendJson(res, 200, { ok: true });
+
+    if (!auth(req)) return sendJson(res, 401, { error: { message: 'missing/invalid proxy api key', type: 'authentication_error' } });
     if (req.method === 'GET' && (p === '/v1/models' || p === '/models')) {
       return sendJson(res, 200, { object: 'list', data: MODELS });
+    }
+
+    // ---- management endpoints ----
+    // stats: any authenticated key (or open when nothing configured)
+    if (req.method === 'GET' && p === '/api/stats') {
+      let session = null;
+      try { session = JSON.parse(fs.readFileSync(path.join(__dirname, 'session.json'), 'utf8')); } catch {}
+      return sendJson(res, 200, stats.snapshot(session));
+    }
+    // keys mgmt: admin-gated (see isAdmin)
+    if (p === '/api/keys') {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
+      if (req.method === 'GET') {
+        const active = keyStore.keys.filter((k) => !k.revoked).length;
+        return sendJson(res, 200, { keys: keyStore.list(), keyed: active > 0, open: !API_KEY && active === 0 });
+      }
+      if (req.method === 'POST') {
+        let b; try { b = JSON.parse((await readBody(req)).toString('utf8')); } catch { return sendJson(res, 400, { error: { message: 'invalid JSON' } }); }
+        return sendJson(res, 200, keyStore.create(b.name));
+      }
+      return sendJson(res, 405, { error: { message: 'method not allowed' } });
+    }
+    const keyDel = /^\/api\/keys\/([^/]+)\/(revoke|delete)$/.exec(p);
+    if (req.method === 'POST' && keyDel) {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
+      const ok = keyDel[2] === 'revoke' ? keyStore.revoke(decodeURIComponent(keyDel[1])) : keyStore.remove(decodeURIComponent(keyDel[1]));
+      return sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: { message: 'key not found' } });
     }
     if (req.method === 'POST' && (p === '/v1/chat/completions' || p === '/v1/chat/completion')) {
       return await handleChatCompletions(req, res);
@@ -198,7 +274,6 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, conv);
       } catch (e) { return sendJson(res, 500, { error: { message: String(e.message) } }); }
     }
-    if (req.method === 'GET' && p === '/health') return sendJson(res, 200, { ok: true });
     return sendJson(res, 404, { error: { message: 'not found: ' + p, type: 'invalid_request_error' } });
   } catch (e) {
     sendJson(res, 500, { error: { message: String(e.message || e), type: 'internal_error' } });

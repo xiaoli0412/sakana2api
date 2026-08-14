@@ -49,3 +49,4 @@ node_modules/
 
 # SSH credentials (local only)
 scripts/.ssh_secret.json
+keys.json

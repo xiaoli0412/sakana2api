@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sakana Chat · 管理面板</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2333; --border: #2d333b;
+    --fg: #e6edf3; --dim: #8b949e; --acc: #4f8cff; --acc2: #a371f7;
+    --user: #1f6feb; --err: #f85149; --ok: #3fb950; --warn: #d29922;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.6 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  a { color: var(--acc); }
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 10px 18px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; }
+  header h1 span { color: var(--acc2); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .dot.err { background: var(--err); }
+  .status { font-size: 12px; color: var(--dim); white-space: nowrap; }
+  .spacer { flex: 1; }
+
+  nav { display: flex; gap: 4px; }
+  nav button {
+    background: transparent; border: none; color: var(--dim); cursor: pointer;
+    font: inherit; font-size: 13.5px; padding: 6px 14px; border-radius: 8px;
+  }
+  nav button:hover { color: var(--fg); background: var(--panel2); }
+  nav button.active { color: var(--fg); background: var(--panel2); box-shadow: inset 0 -2px var(--acc); }
+
+  main { flex: 1; overflow-y: auto; padding: 22px 18px 10px; }
+  .wrap { max-width: 920px; margin: 0 auto; }
+
+  /* ---- chat tab ---- */
+  .msgs { display: flex; flex-direction: column; gap: 18px; }
+  .msg { display: flex; gap: 12px; }
+  .avatar {
+    width: 32px; height: 32px; border-radius: 8px; flex: 0 0 32px;
+    display: flex; align-items: center; justify-content: center; font-size: 16px;
+    background: var(--panel2); border: 1px solid var(--border);
+  }
+  .msg.user .avatar { background: #1f3a5f; border-color: var(--user); }
+  .bubble {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 14px; min-width: 0; max-width: 100%; overflow-wrap: break-word;
+  }
+  .msg.user .bubble { background: #11253f; }
+  .bubble .who { font-size: 11px; color: var(--dim); margin-bottom: 4px; }
+  .bubble .who b { color: var(--acc2); }
+  .reasoning {
+    border-left: 3px solid var(--acc2); padding: 6px 12px; margin: 8px 0;
+    color: var(--dim); font-size: 13px; white-space: pre-wrap; border-radius: 0 8px 8px 0;
+    background: rgba(163,113,247,.06);
+  }
+  .cite { display: inline-block; font-size: 11px; color: var(--acc); margin: 2px 6px 2px 0;
+    text-decoration: none; border: 1px solid rgba(79,140,255,.4); border-radius: 20px; padding: 1px 9px; }
+  .file-chip {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim);
+    border: 1px dashed var(--border); border-radius: 8px; padding: 4px 10px; margin: 4px 8px 4px 0;
+  }
+  .file-chip img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
+  .toolturn { margin: 4px 0; font-size: 12.5px; color: var(--acc2);
+    background: rgba(163,113,247,.08); border-radius: 8px; padding: 6px 12px; white-space: pre-wrap; }
+  pre { background: #0a0e14; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; overflow-x: auto; margin: 8px 0; font-size: 12.5px; }
+  code { font-family: "Cascadia Code", Consolas, monospace; }
+  p code { background: #21262d; border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
+  .typing::after { content: "▍"; animation: blink 1s steps(1) infinite; color: var(--acc); }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  footer {
+    padding: 10px 18px 16px; background: var(--panel); border-top: 1px solid var(--border);
+  }
+  .inputbar {
+    max-width: 920px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 12px; padding: 8px 10px;
+  }
+  .inputbar textarea {
+    flex: 1; background: transparent; border: none; outline: none; resize: none;
+    color: var(--fg); font: inherit; max-height: 140px; padding: 6px 4px;
+  }
+  .iconbtn {
+    background: var(--panel); border: 1px solid var(--border); color: var(--dim);
+    border-radius: 8px; width: 34px; height: 34px; font-size: 16px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .iconbtn:hover:not(:disabled) { color: var(--fg); border-color: var(--acc); }
+  .iconbtn:disabled { opacity: .4; cursor: not-allowed; }
+  .iconbtn.send { background: var(--acc); border-color: var(--acc); color: #fff; }
+  .iconbtn.send:hover:not(:disabled) { background: #3d78e8; }
+  #attachments { max-width: 920px; margin: 6px auto 0; display: flex; flex-wrap: wrap; gap: 6px; }
+  .empty { text-align: center; color: var(--dim); margin-top: 10vh; }
+  .empty .big { font-size: 44px; margin-bottom: 12px; }
+
+  /* ---- dashboard cards ---- */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px;
+  }
+  .card .lab { font-size: 12px; color: var(--dim); margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+  .card .val { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card .sub { font-size: 11.5px; color: var(--dim); margin-top: 2px; }
+  .card.sess { grid-column: span 2; }
+  .barline { display: flex; align-items: center; gap: 8px; font-size: 12.5px; margin: 6px 0; }
+  .barline .nm { width: 160px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .barline .bar { flex: 1; background: var(--panel2); border-radius: 6px; height: 16px; overflow: hidden; }
+  .barline .bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--acc), var(--acc2)); border-radius: 6px; }
+  .barline .ct { width: 90px; text-align: right; font-variant-numeric: tabular-nums; }
+
+  h2 { font-size: 15px; margin: 22px 0 10px; color: var(--fg); }
+  h2 .count { color: var(--dim); font-size: 12.5px; font-weight: 400; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  tr:hover td { background: var(--panel2); }
+  .mono { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 20px; border: 1px solid var(--border); }
+  .pill.on { color: var(--ok); border-color: rgba(63,185,80,.5); }
+  .pill.off { color: var(--dim); }
+  .pill.rev { color: var(--err); border-color: rgba(248,81,73,.5); }
+
+  .btn {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 8px; padding: 6px 14px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .btn:hover { border-color: var(--acc); }
+  .btn.primary { background: var(--acc); border-color: var(--acc); color: #fff; }
+  .btn.primary:hover { background: #3d78e8; }
+  .btn.danger { background: transparent; border-color: rgba(248,81,73,.5); color: var(--err); }
+  .btn.sm { padding: 3px 10px; font-size: 12px; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+  input[type=text], input[type=password] {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 8px; padding: 7px 12px; font: inherit; font-size: 13px; outline: none;
+  }
+  input[type=text]:focus, input[type=password]:focus { border-color: var(--acc); }
+  .muted { color: var(--dim); font-size: 12.5px; }
+  .errbox { color: var(--err); font-size: 13px; margin: 8px 0; }
+  .conv-item {
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+    border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; cursor: pointer;
+    background: var(--panel);
+  }
+  .conv-item:hover { border-color: var(--acc); }
+  .conv-item .t { flex: 1; min-width: 0; }
+  .conv-item .t b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .conv-item .t span { font-size: 11.5px; color: var(--dim); }
+  .keyv {
+    display: flex; align-items: center; gap: 8px; background: #0a0e14; border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px; margin: 8px 0; font-family: "Cascadia Code", Consolas, monospace;
+    font-size: 12.5px; word-break: break-all;
+  }
+  .toast {
+    position: fixed; top: 14px; right: 14px; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 16px; font-size: 13px; z-index: 99; display: none;
+    box-shadow: 0 4px 20px rgba(0,0,0,.4); max-width: 420px;
+  }
+  .toast.show { display: block; }
+  .toast.ok b { color: var(--ok); } .toast.err b { color: var(--err); }
+  [hidden] { display: none !important; }
+  @media (max-width: 700px) { .hidesm { display: none; } .card.sess { grid-column: auto; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>🐟 <span>sakana-panel</span></h1>
+  <span class="dot" id="dot"></span>
+  <span class="status" id="status">connecting…</span>
+  <nav>
+    <button data-tab="chat" class="active">💬 聊天</button>
+    <button data-tab="mon">📊 监控</button>
+    <button data-tab="conv">🗂 会话</button>
+    <button data-tab="keys">🔑 密钥</button>
+  </nav>
+  <span class="spacer"></span>
+  <label class="hidesm">模型
+    <select id="model">
+      <option value="sakana-namazu">Namazu</option>
+      <option value="sakana-namazu:standard">Namazu · Standard 🐟</option>
+      <option value="sakana-namazu:polite">Namazu · Polite 🐠</option>
+      <option value="sakana-namazu:osaka">Namazu · Osaka 🐙</option>
+    </select>
+  </label>
+  <label class="hidesm" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--dim)">
+    <input type="checkbox" id="think" style="accent-color:var(--acc)"> 思考
+  </label>
+  <label class="hidesm" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--dim)">
+    <input type="checkbox" id="search" style="accent-color:var(--acc)"> 搜索
+  </label>
+  <button class="iconbtn" id="newchat" title="新会话">＋</button>
+</header>
+
+<main id="main">
+  <!-- ============ TAB: CHAT ============ -->
+  <div class="wrap" data-pane="chat">
+    <div class="msgs" id="msgs">
+      <div class="empty" id="empty">
+        <div class="big">🐟</div>
+        <p>免费 AI 对话 · 管理面板</p>
+        <p class="muted">流式输出 / 思维链 / Web 搜索 / 图片 / 多轮记忆 / 工具调用</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ TAB: MONITOR ============ -->
+  <div class="wrap" data-pane="mon" hidden>
+    <div class="cards" id="moncards"></div>
+    <h2>请求统计 <span class="count" id="monLast"></span></h2>
+    <div id="monbars"></div>
+    <h2>运行状态</h2>
+    <table id="montable"></table>
+  </div>
+
+  <!-- ============ TAB: CONVERSATIONS ============ -->
+  <div class="wrap" data-pane="conv" hidden>
+    <div class="row">
+      <span class="muted">聊天记录(上游会话列表)</span>
+      <button class="btn sm" id="convRefresh">刷新</button>
+    </div>
+    <div id="convs"></div>
+  </div>
+
+  <!-- ============ TAB: KEYS ============ -->
+  <div class="wrap" data-pane="keys" hidden>
+    <div id="keyLock" hidden>
+      <div class="row">
+        <input type="password" id="adminKey" placeholder="输入管理 API_KEY(环境变量设置的)" style="flex:1;max-width:360px">
+        <button class="btn primary" id="adminUnlock">解锁</button>
+      </div>
+      <p class="muted">未设置 API_KEY 时面板可直开;设置了则需要管理密钥才能创建/管理 Key。</p>
+    </div>
+    <div id="keyBody" hidden>
+      <div class="row">
+        <input type="text" id="keyName" placeholder="Key 名称(如: claude-code-1)" style="flex:1;max-width:360px">
+        <button class="btn primary" id="keyCreate">生成 Key</button>
+      </div>
+      <div id="keyNew" hidden></div>
+      <table>
+        <thead><tr><th>名称</th><th>前缀</th><th>状态</th><th>创建时间</th><th>最近使用</th><th>操作</th></tr></thead>
+        <tbody id="keyRows"></tbody>
+      </table>
+      <p class="muted" id="keyHint"></p>
+    </div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<div id="attachments"></div>
+<footer>
+  <div class="inputbar">
+    <textarea id="input" rows="1" placeholder="输入消息…(Enter 发送, Shift+Enter 换行)"></textarea>
+    <div class="btns" style="display:flex;gap:6px">
+      <button class="iconbtn" id="attach" title="上传图片">🖼️</button>
+      <button class="iconbtn send" id="send" title="发送">➤</button>
+    </div>
+  </div>
+</footer>
+<input type="file" id="file" accept="image/*" hidden>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const msgs = $('msgs'), input = $('input'), sendBtn = $('send');
+let conversationId = null, busy = false;
+
+/* ---------- toast ---------- */
+let toastTimer;
+function toast(msg, kind = 'ok') {
+  const t = $('toast');
+  t.className = 'toast show ' + kind;
+  t.innerHTML = '<b>' + (kind === 'ok' ? '✓ ' : '⚠ ') + '</b>' + msg;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = 'toast'; }, 3500);
+}
+
+/* ---------- markdown ---------- */
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function renderMd(text) {
+  let html = esc(text);
+  html = html.replace(/```([\s\S]*?)```/g, (_, code) => {
+    const c = code.split('\n'); const lang = (c[0] || '').trim().replace(/\W/g, '');
+    return `<pre><code>${esc(c.slice(lang ? 1 : 0).join('\n'))}</code></pre>`;
+  });
+  html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/\*([^*]+)\*/g, '<i>$1</i>');
+  html = html.replace(/^&gt;\s?(.*)$/gm, '<blockquote style="border-left:3px solid var(--border);padding-left:10px;color:var(--dim);margin:6px 0">$1</blockquote>');
+  html = html.replace(/\n{2,}/g, '</p><p>');
+  return '<p>' + html + '</p>';
+}
+
+/* ---------- chat ---------- */
+function addMsg(role) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + role;
+  el.innerHTML = `<div class="avatar">${role === 'user' ? '🧑' : '🐟'}</div><div class="bubble"><div class="who"><b>${role === 'user' ? '你' : 'Sakana'}</b></div><div class="body"></div></div>`;
+  msgs.appendChild(el);
+  scrollBottom();
+  return el.querySelector('.body');
+}
+function scrollBottom() { $('main').scrollTop = $('main').scrollHeight; }
+function removeTyping() { const t = msgs.querySelector('.typing'); if (t) t.classList.remove('typing'); }
+
+const attachments = [];
+const attachWrap = $('attachments');
+$('attach').onclick = () => $('file').click();
+$('file').onchange = (e) => {
+  for (const file of e.target.files) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      attachments.push({ name: file.name, dataUrl: reader.result });
+      const chip = document.createElement('span');
+      chip.className = 'file-chip';
+      chip.innerHTML = `<img src="${reader.result}"><span>${esc(file.name)}</span><button class="iconbtn" style="width:20px;height:20px;font-size:12px">✕</button>`;
+      chip.querySelector('button').onclick = () => {
+        const i = attachments.findIndex(a => a.dataUrl === reader.result);
+        if (i >= 0) attachments.splice(i, 1);
+        chip.remove();
+      };
+      attachWrap.appendChild(chip);
+    };
+    reader.readAsDataURL(file);
+  }
+  e.target.value = '';
+};
+function clearAttachments() { attachments.length = 0; attachWrap.innerHTML = ''; }
+
+async function send() {
+  const text = input.value.trim();
+  if (!text && !attachments.length) return;
+  if (busy) return;
+  const userBody = addMsg('user');
+  userBody.appendChild(document.createTextNode(text));
+  const savedFiles = [...attachments];
+  for (const f of savedFiles) {
+    const chip = document.createElement('span');
+    chip.className = 'file-chip';
+    chip.innerHTML = `<img src="${f.dataUrl}"><span>${esc(f.name)}</span>`;
+    userBody.appendChild(chip);
+  }
+  clearAttachments();
+  input.value = ''; input.style.height = 'auto';
+  setBusy(true);
+
+  const content = [];
+  if (text) content.push({ type: 'text', text });
+  for (const f of savedFiles) content.push({ type: 'image_url', image_url: { url: f.dataUrl } });
+
+  const body = { model: $('model').value, messages: [{ role: 'user', content: (text && !savedFiles.length) ? text : content }], stream: true };
+  if (conversationId) body.conversation_id = conversationId;
+  if ($('think').checked) body.reasoning_effort = 'medium';
+  if ($('search').checked) body.web_search = true;
+
+  const aiBody = addMsg('assistant');
+  aiBody.classList.add('typing');
+  let reasoning = '', answer = '', cites = [], gotReasoning = false;
+
+  try {
+    const resp = await fetch('/v1/chat/completions', {
+      method: 'POST', headers: { 'content-type': 'application/json', ...adminHeader() }, body: JSON.stringify(body),
+    });
+    const newConv = resp.headers.get('x-conversation-id');
+    if (newConv) conversationId = newConv;
+    if (!resp.ok || !resp.body) {
+      const e = await resp.json().catch(() => ({}));
+      throw new Error(e.error?.message || ('HTTP ' + resp.status));
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n'); buf = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6);
+        if (payload === '[DONE]') continue;
+        let o; try { o = JSON.parse(payload); } catch { continue; }
+        const delta = o.choices?.[0]?.delta || {};
+        if (delta.reasoning_content) { gotReasoning = true; reasoning += delta.reasoning_content; }
+        else if (delta.content) {
+          removeTyping();
+          answer += delta.content;
+          aiBody.innerHTML = '';
+          aiBody.appendChild(document.createTextNode(answer));
+          scrollBottom();
+        } else if (delta.tool_turn_text) {
+          const d = document.createElement('div');
+          d.className = 'toolturn';
+          d.textContent = '🔧 ' + delta.tool_turn_text;
+          aiBody.insertBefore(d, aiBody.firstChild);
+        }
+        if (o.citations) cites = o.citations;
+      }
+    }
+    removeTyping();
+    aiBody.innerHTML = '';
+    if (gotReasoning) {
+      const r = document.createElement('details');
+      r.className = 'reasoning';
+      r.innerHTML = '<summary>💭 思维链</summary>';
+      const p = document.createElement('div');
+      p.style.whiteSpace = 'pre-wrap';
+      p.textContent = reasoning;
+      r.appendChild(p);
+      aiBody.appendChild(r);
+    }
+    if (answer) {
+      const div = document.createElement('div');
+      div.innerHTML = renderMd(answer);
+      aiBody.appendChild(div);
+    }
+    if (cites.length) {
+      const meta = document.createElement('div');
+      meta.style.cssText = 'margin-top:8px;font-size:11px;color:var(--dim)';
+      meta.textContent = '来源 ';
+      for (const c of cites) {
+        const a = document.createElement('a');
+        a.className = 'cite';
+        a.href = c.url || '#'; a.target = '_blank'; a.rel = 'noopener';
+        a.textContent = '🔗 ' + (c.title || c.url);
+        meta.appendChild(a);
+      }
+      aiBody.appendChild(meta);
+    }
+    scrollBottom();
+  } catch (e) {
+    removeTyping();
+    aiBody.innerHTML = '';
+    const err = document.createElement('div');
+    err.style.cssText = 'color:var(--err)';
+    err.textContent = '⚠️ ' + e.message;
+    aiBody.appendChild(err);
+  }
+  setBusy(false);
+}
+function setBusy(b) { busy = b; sendBtn.disabled = b; $('attach').disabled = b; input.disabled = b; }
+input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 140) + 'px'; });
+sendBtn.onclick = send;
+$('newchat').onclick = () => {
+  conversationId = null;
+  msgs.innerHTML = '';
+  msgs.appendChild($('empty'));
+  $('empty').style.display = '';
+  input.focus();
+};
+
+/* ---------- tabs ---------- */
+document.querySelectorAll('nav button').forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll('nav button').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    document.querySelectorAll('[data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== b.dataset.tab; });
+    if (b.dataset.tab === 'mon') refreshMon();
+    if (b.dataset.tab === 'conv') refreshConvs();
+    if (b.dataset.tab === 'keys') refreshKeys();
+  };
+});
+
+/* ---------- monitor ---------- */
+const fmtTime = (sec) => sec < 60 ? sec + 's' : sec < 3600 ? Math.floor(sec / 60) + 'm' : (sec / 3600).toFixed(1) + 'h';
+const fmtDT = (ts) => ts ? new Date(ts).toLocaleString() : '—';
+const fmtK = (n) => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+
+async function refreshMon() {
+  const cards = $('moncards');
+  const st = await (await api('/api/stats')).json().catch(() => null);
+  if (!st) { cards.innerHTML = '<div class="errbox">无法获取统计</div>'; return; }
+  const s = st.session;
+  const errPct = st.requests.total ? Math.round(100 * st.requests.err / st.requests.total) : 0;
+  cards.innerHTML = `
+    <div class="card"><div class="lab">🟢 服务状态</div><div class="val">${st.requests.err === 0 ? '正常' : '有错误'}</div>
+      <div class="sub">运行 ${fmtTime(st.uptimeSec)} · 错误率 ${errPct}%</div></div>
+    <div class="card"><div class="lab">💬 请求数</div><div class="val">${fmtK(st.requests.total)}</div>
+      <div class="sub">成功 ${st.requests.ok} / 流式 ${st.requests.stream} / 非流式 ${st.requests.nonStream}</div></div>
+    <div class="card"><div class="lab">🧮 Token 用量(估算)</div><div class="val">${fmtK(st.tokens.completion)}</div>
+      <div class="sub">输出 ~${fmtK(st.tokens.completion)} · 输入 ~${fmtK(st.tokens.prompt)}</div></div>
+    <div class="card"><div class="lab">🗂 会话数</div><div class="val">${st.conversations}</div>
+      <div class="sub">本进程新建会话</div></div>
+    <div class="card sess"><div class="lab">🔐 上游会话</div>
+      <div class="val" style="font-size:16px">${s && s.loggedIn ? '已登录 ✅' : '未登录 ❌'}</div>
+      <div class="sub">${s ? '用户: ' + (s.email || s.uid || '?') + (s.anonymous ? ' (匿名)' : '') + ' · Cookie ' + s.cookieCount + ' 个 · 距今 ' + (s.ageSec == null ? '?' : fmtTime(s.ageSec)) : '—'}</div></div>
+  `;
+  const bars = $('monbars');
+  const byModel = Object.entries(st.byModel || {});
+  const maxR = Math.max(1, ...byModel.map(([, v]) => v.requests));
+  bars.innerHTML = byModel.length
+    ? byModel.map(([m, v]) => `
+      <div class="barline"><span class="nm">${esc(m)}</span>
+        <div class="bar"><i style="width:${Math.round(100 * v.requests / maxR)}%"></i></div>
+        <span class="ct">${v.requests} 次 / ${fmtK(v.charsOut)}ch</span></div>`).join('')
+    : '<p class="muted">暂无请求数据</p>';
+  $('monLast').textContent = '最后更新 ' + new Date().toLocaleTimeString();
+  $('montable').innerHTML = `
+    <tbody>
+      <tr><td>上次错误</td><td class="mono">${st.lastErr ? esc(String(st.lastErr)) + (st.lastErrAt ? ' @ ' + fmtDT(st.lastErrAt) : '') : '无'}</td></tr>
+      <tr><td>鉴权模式</td><td id="authModeCell">—</td></tr>
+      <tr><td>API 基址</td><td class="mono">${location.origin}/v1</td></tr>
+      <tr><td>模型</td><td>Namazu / Fugu(免费额度 Namazu $12.5/天)</td></tr>
+    </tbody>`;
+}
+
+/* ---------- conversations ---------- */
+async function refreshConvs() {
+  const box = $('convs');
+  box.innerHTML = '<p class="muted">加载中…</p>';
+  try {
+    const r = await api('/v1/conversations?p=0');
+    const j = await r.json();
+    const list = j.conversations || [];
+    if (!list.length) { box.innerHTML = '<p class="muted">暂无会话记录</p>'; return; }
+    box.innerHTML = list.map((c) => `
+      <div class="conv-item" data-id="${esc(c.id)}">
+        <div class="t"><b>${esc(c.title || c.id)}</b>
+          <span>${fmtDT(c.updatedAt || c.createdAt)} · ${(c.messageCount ?? '')} 条消息</span></div>
+        <button class="btn sm">查看</button>
+      </div>`).join('');
+    box.querySelectorAll('.conv-item').forEach((el) => {
+      el.onclick = async () => {
+        const id = el.dataset.id;
+        const r = await api('/v1/conversations/' + encodeURIComponent(id) + '/messages');
+        const j = await r.json();
+        const msgsList = j.messages || [];
+        let html = '';
+        for (const m of msgsList) {
+          const role = m.role === 'user' ? '🧑 你' : '🐟 Sakana';
+          const txt = m.text || m.content || m.textContent || '';
+          html += `<div class="bubble" style="margin:6px 0"><div class="who"><b>${role}</b></div>${renderMd(String(txt))}</div>`;
+        }
+        const pop = document.createElement('div');
+        pop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;display:flex;align-items:center;justify-content:center';
+        pop.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;width:min(680px,94vw);max-height:80vh;overflow:auto;padding:18px">
+          <div class="row"><b>${esc(el.querySelector('.t b').textContent)}</b><span class="spacer"></span>
+          <button class="btn sm" id="popClose">关闭</button></div>${html}</div>`;
+        pop.onclick = (e) => { if (e.target === pop || e.target.id === 'popClose') pop.remove(); };
+        document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') pop.remove(); }, { once: true });
+        document.body.appendChild(pop);
+      };
+    });
+  } catch (e) { box.innerHTML = `<p class="errbox">加载失败: ${esc(e.message)}</p>`; }
+}
+
+/* ---------- keys ---------- */
+// When a key is created (or user unlocks with one), we remember it so the
+// management endpoints stay reachable once auth is enforced.
+let adminUnlocked = !!sessionStorage.getItem('sakAdminKey');
+const sakKey = () => sessionStorage.getItem('sakAdminKey') || '';
+function adminHeader() { return adminUnlocked && sakKey() ? { 'authorization': 'Bearer ' + sakKey() } : {}; }
+// attach the saved key to every API call made by the panel
+function api(url, opts = {}) {
+  return fetch(url, { ...opts, headers: { ...adminHeader(), ...(opts.headers || {}) } });
+}
+$('adminUnlock').onclick = async () => {
+  const v = $('adminKey').value.trim();
+  if (!v) return;
+  try {
+    const r = await fetch('/api/keys', { headers: { 'authorization': 'Bearer ' + v } });
+    if (r.ok) {
+      adminUnlocked = true;
+      sessionStorage.setItem('sakAdminKey', v);
+      sessionStorage.setItem('sakAdminUnlocked', '1');
+      toast('管理员解锁成功');
+      refreshKeys();
+    } else toast('管理密钥无效', 'err');
+  } catch { toast('请求失败', 'err'); }
+};
+async function refreshKeys() {
+  const gate = async () => {
+    const r = await fetch('/api/keys', { headers: adminHeader() });
+    if (r.status === 403) { $('keyLock').hidden = false; $('keyBody').hidden = true; return null; }
+    if (r.status === 401) {
+      // keyed mode and our saved key is stale/revoked -> ask again
+      sessionStorage.removeItem('sakAdminKey');
+      adminUnlocked = false;
+      $('keyLock').hidden = false;
+      $('keyBody').hidden = true;
+      return null;
+    }
+    return await r.json();
+  };
+  const data = await gate();
+  if (!data) return;
+  $('keyLock').hidden = true;
+  $('keyBody').hidden = false;
+  $('keyHint').textContent = data.open
+    ? '当前为开放模式(不需要 Key)。创建第一个 Key 后,接口将要求 Bearer 认证。'
+    : `已启用 Key 认证(${data.keys.length} 个, 活跃 ${data.keys.filter(k => !k.revoked).length} 个)。调用 API 时携带 Authorization: Bearer <key>。`;
+  const rows = data.keys.map((k) => `
+    <tr>
+      <td>${esc(k.name)}${k.id === null ? '' : ''}</td>
+      <td class="mono">${esc(k.prefix)}…</td>
+      <td><span class="pill ${k.revoked ? 'rev' : 'on'}">${k.revoked ? '已撤销' : '活跃'}</span></td>
+      <td>${fmtDT(k.created)}</td>
+      <td>${k.lastUsed ? fmtDT(k.lastUsed) : '—'}</td>
+      <td>${k.revoked ? '' : `<button class="btn sm danger" onclick="revokeKey('${k.id}')">撤销</button>`}</td>
+    </tr>`).join('');
+  $('keyRows').innerHTML = rows || '<tr><td colspan="6" class="muted">暂无 Key — 在下方创建一个</td></tr>';
+}
+async function revokeKey(id) {
+  if (!confirm('撤销该 Key?撤销后立即失效。')) return;
+  const r = await fetch('/api/keys/' + id + '/revoke', { method: 'POST', headers: adminHeader() });
+  if (r.ok) { toast('已撤销'); refreshKeys(); } else toast('操作失败', 'err');
+}
+$('keyCreate').onclick = async () => {
+  const name = $('keyName').value.trim() || 'key-' + Date.now().toString(36);
+  const r = await fetch('/api/keys', {
+    method: 'POST', headers: { 'content-type': 'application/json', ...adminHeader() },
+    body: JSON.stringify({ name }),
+  });
+  if (r.status === 403) { toast('需要管理密钥(设置 API_KEY 环境变量并用它解锁)', 'err'); return; }
+  const j = await r.json();
+  if (!j.key) { toast('创建失败', 'err'); return; }
+  $('keyName').value = '';
+  // remember this key as the admin credential so the panel stays usable
+  if (!adminUnlocked) {
+    sessionStorage.setItem('sakAdminKey', j.key);
+    adminUnlocked = true;
+  }
+  const box = $('keyNew');
+  box.hidden = false;
+  box.innerHTML = `<div class="keyv">${esc(j.key)} <button class="btn sm" onclick="navigator.clipboard.writeText('${j.key}');toast('已复制')">复制</button></div>
+    <p class="muted">⚠️ 只显示一次,请立即保存。之后只能看到前缀。</p>`;
+  refreshKeys();
+};
+
+/* ---------- health ---------- */
+async function health() {
+  try {
+    const r = await api('/health');
+    if ((await r.json()).ok) { $('dot').classList.add('ok'); $('dot').classList.remove('err'); $('status').textContent = '在线 · 免费会话'; }
+  } catch { $('dot').classList.add('err'); $('dot').classList.remove('ok'); $('status').textContent = '离线'; }
+}
+health();
+setInterval(health, 30000);
+setInterval(() => { const p = document.querySelector('[data-pane="mon"]'); if (!p.hidden) refreshMon(); }, 10000);
+input.focus();
+</script>
+</body>
+</html>

@@ -65,5 +65,11 @@ try:
 except Exception:
     print('[6] web RAW:', r[:200])
 
+print('[7] panel UI:', run('curl -s -o /dev/null -w "%{http_code}" -m 10 http://127.0.0.1:8787/', 30))
+print('[8] health:', run('curl -s -m 10 http://127.0.0.1:8787/health', 30).strip())
+print('[9] stats:', run('curl -s -m 10 http://127.0.0.1:8787/api/stats', 30)[:160])
+print('[10] keys (open):', run('curl -s -m 10 http://127.0.0.1:8787/api/keys', 30)[:120])
+print('[11] conversations:', run('curl -s -m 20 "http://127.0.0.1:8787/v1/conversations?p=0"', 60)[:120])
+
 ssh.close()
 print('DONE')

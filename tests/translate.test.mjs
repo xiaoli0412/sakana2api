@@ -79,4 +79,24 @@ console.log('== 4. web search toolResult shape (from real bundle) ==');
   check('search toolResult consumed w/o crash', Array.isArray(out));
 }
 
+console.log('== 5. multi-token accumulation dedup (regression) ==');
+{
+  const t = new NdjsonTranslator();
+  // tokens are consecutive slices of the final text (NUL-padded on the wire);
+  // output must equal the final text exactly once
+  const lines = [
+    { type: 'stream', token: 'BANANA B\0\0\0\0\0\0\0\0' },
+    { type: 'stream', token: 'ANANA BANANA\0\0\0\0' },
+    { type: 'finalAnswer', text: 'BANANA BANANA BANANA\0\0\0\0\0\0\0' },
+  ];
+  let out = '';
+  for (const l of lines) {
+    for (const c of t.line(JSON.stringify(l))) {
+      const d = c.choices[0].delta;
+      if (d.content) out += d.content;
+    }
+  }
+  check('multi-token stream emits final text exactly once', out === 'BANANA BANANA BANANA', JSON.stringify(out));
+}
+
 process.exit(failures ? 1 : 0);
