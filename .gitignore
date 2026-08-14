@@ -1,0 +1,47 @@
+# Do not commit session/token files (contain cookies and firebase tokens)
+session.json
+tokens.json
+tempmail.json
+mailtoken.json
+mailmsg.json
+success_sample.json
+raw_search*.txt
+
+# Chrome user data dir
+.chrome-sakana-profile/
+
+# Server logs
+server.log
+
+# Temporary scripts used during reverse engineering
+capture_*.mjs
+check_*.mjs
+click_login.mjs
+compare_auth.mjs
+complete_login.mjs
+debug_stream.mjs
+do_login.mjs
+dump_*.mjs
+find_bundle.mjs
+firebase_login.mjs
+harvest_session.mjs
+net_trace*.mjs
+node_replay_sample.mjs
+open_magic_link.mjs
+probe_*.mjs
+replicate_*.mjs
+scan_*.mjs
+tamper_test.mjs
+test_*.mjs
+ui_upload*.mjs
+brute_stream*.mjs
+
+# Downloaded JS chunks (large, can be regenerated)
+chunk-*.js
+
+# Test images
+red.png
+red64.png
+
+# Node
+node_modules/
