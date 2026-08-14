@@ -1,9 +1,11 @@
 // Deploy script: SSH into server, install Node/Chrome, clone repo, start service
 import { spawn } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const fs = require('fs');
-const path = require('path');
+const fs = { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync: (await import('fs')).readdirSync };
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Credentials from scripts/.ssh_secret.json (gitignored) or env vars.
 const _secPath = path.join(__dirname, '.ssh_secret.json');
 const _sec = fs.existsSync(_secPath) ? JSON.parse(fs.readFileSync(_secPath, 'utf8')) : {};

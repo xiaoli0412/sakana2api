@@ -5,6 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
 const { MODELS, openaiRequestToSakana, NdjsonTranslator, sse, clean, stripChips, extractFileContent } = require('./lib/translate');
 const { SakanaUpstream, UpstreamError } = require('./lib/upstream');
 const { getSession, loadSession } = require('./lib/session');
@@ -12,6 +13,10 @@ const { autoSession } = require('./lib/auto-session');
 const { Stats, KeyStore } = require('./lib/stats');
 const { AccountPool } = require('./lib/account-pool');
 const { Cache } = require('./lib/cache');
+
+// Bind ONE account to the whole request: createConversation + streamGenerate
+// must use the same session or the upstream 404s with CONV-NOTFOUND-001.
+const als = new AsyncLocalStorage();
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -25,7 +30,11 @@ const accountPool = new AccountPool();
 const cache = new Cache();
 
 const upstream = new SakanaUpstream(() => {
-  // Try account pool first, fall back to session.json
+  // One account per request (AsyncLocalStorage): createConversation and
+  // streamGenerate must share the same session, else CONV-NOTFOUND-001.
+  const bound = als.getStore();
+  if (bound && bound.session) return bound.session;
+  // Fallback for non-request contexts (bootstrap keep-alive etc.)
   const acct = accountPool.next();
   if (acct) return acct;
   return getSession();
@@ -131,9 +140,11 @@ function lookupContext(prevMsg) {
 function saveContext(lastMsg, conversationId, lastMessageId) {
   if (!lastMsg) return;
   const h = hash(lastMsg);
+  const bound = als.getStore();
   const prev = contextMap.get(h);
   contextMap.set(h, {
     conversationId,
+    accountId: (bound && bound.session && bound.session.id) || (prev && prev.accountId) || '',
     lastMessageId: lastMessageId || (prev && prev.lastMessageId) || '',
     ts: Date.now(),
   });
@@ -143,13 +154,24 @@ function saveContext(lastMsg, conversationId, lastMessageId) {
   }
 }
 
-// Raw text of the LAST user message in the request — the stable context key.
-// (NOT the translated prompt: after tool-hint injection sakanaReq.prompt no
-// longer equals the client's user text, which broke auto-continuation.)
+// Raw text of the FIRST user message in the request — the stable context key.
+// A multi-turn client sends the full history each time, so the first user
+// message identifies the conversation. (NOT the translated prompt: after
+// tool-hint injection sakanaReq.prompt no longer equals the client's user
+// text, which broke auto-continuation.)
 function lastUserText(body) {
   const msgs = Array.isArray(body.messages) ? body.messages : [];
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
+    if (!m || m.role !== 'user') continue;
+    const c = m.content;
+    return typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => p && (p.text || p.content || '')).join(' ') : '');
+  }
+  return '';
+}
+function firstUserText(body) {
+  const msgs = Array.isArray(body.messages) ? body.messages : [];
+  for (const m of msgs) {
     if (!m || m.role !== 'user') continue;
     const c = m.content;
     return typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => p && (p.text || p.content || '')).join(' ') : '');
@@ -164,6 +186,29 @@ async function handleChatCompletions(req, res) {
   let body;
   try { body = JSON.parse(raw.toString('utf8')); }
   catch { const e = sendJson(res, 400, { error: { message: 'invalid JSON', type: 'invalid_request_error' } }); return; }
+
+  // A continuation (auto-context) MUST reuse the account that owns the
+  // conversation, or upstream 404s (CONV-NOTFOUND-001).
+  let boundAccount = null;
+  const prevText = firstUserText(body);
+  // Reuse the account bound to this conversation's creating request
+  const ctxEntry = prevText ? lookupContext(prevText) : null;
+  if (ctxEntry && ctxEntry.accountId) {
+    boundAccount = accountPool.get(ctxEntry.accountId) || null;
+  } else if (!ctxEntry) {
+    // New conversation: try to reuse the account from the previous turn if the
+    // client passes the same user text prefix (common multi-turn client).
+    const anyCtx = [...contextMap.values()][0];
+  }
+  if (!boundAccount) {
+    const acct = accountPool.next();
+    boundAccount = acct || await getSession().catch(() => null);
+  }
+  return als.run({ session: boundAccount, ctxEntry }, () => handleChatInner(req, res, body, start, ctxEntry));
+}
+
+/** inner handler (runs with request-bound session via AsyncLocalStorage) */
+async function handleChatInner(req, res, body, start, ctxEntry) {
 
   try {
     const sakanaReq = openaiRequestToSakana(body);
@@ -201,26 +246,14 @@ async function handleChatCompletions(req, res) {
     let conversationId = sakanaReq.conversationId;
     let lastMessageId = '';
 
-    // Auto-context lookup (client continues without passing conversation_id)
-    if (!conversationId) {
-      const msgs = Array.isArray(body.messages) ? body.messages : [];
-      let prevUserMsg = '';
-      if (msgs.length > 1) {
-        for (let i = msgs.length - 2; i >= 0; i--) {
-          if (msgs[i] && msgs[i].role === 'user') {
-            const c = msgs[i].content;
-            prevUserMsg = typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => p.text || '').join(' ') : '');
-            break;
-          }
-        }
-      }
-      const found = prevUserMsg ? lookupContext(prevUserMsg) : null;
-      if (found) {
-        conversationId = found.conversationId;
-        lastMessageId = found.lastMessageId || '';
-        if (!lastMessageId) {
-          try { lastMessageId = await upstream.getLastMessageId(conversationId); } catch { conversationId = null; }
-        }
+    // Auto-context lookup (client continues without passing conversation_id).
+    // ctxEntry was resolved before account binding; reuse it to keep the same
+    // account that owns the conversation (CONV-NOTFOUND-001 otherwise).
+    if (!conversationId && ctxEntry) {
+      conversationId = ctxEntry.conversationId;
+      lastMessageId = ctxEntry.lastMessageId || '';
+      if (!lastMessageId) {
+        try { lastMessageId = await upstream.getLastMessageId(conversationId); } catch { conversationId = null; }
       }
     }
 
@@ -283,7 +316,7 @@ async function handleChatCompletions(req, res) {
         usage: { prompt_tokens: Math.round(promptChars / 4), completion_tokens: Math.round((text.length + reasoning.length) / 4), total_tokens: 0 },
       };
       stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: req.keyId });
-      saveContext(lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+      saveContext(firstUserText(body) || lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
       if (cacheKey) cache.set(cacheKey, response);
       res.setHeader('x-conversation-id', conversationId || '');
       const entry = auditEntry(req, body, 200, response, null, Date.now() - start);
@@ -340,7 +373,7 @@ async function handleChatCompletions(req, res) {
     } catch {}
     const ok = !streamError;
     stats.finish({ stream: true, ok, model: modelName, promptChars, completionChars: streamedChars, keyId: req.keyId });
-    saveContext(lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+    saveContext(firstUserText(body) || lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
     auditEntry(req, body, ok ? 200 : 500, null, streamError, Date.now() - start);
   } catch (e) {
     if (res.headersSent) { try { res.end(); } catch {} return; }
@@ -485,6 +518,11 @@ async function handleAnthropicMessages(req, res) {
  * promptTokens, completionTokens } or an AsyncGenerator of SSE chunks when stream.
  */
 async function makeChatResponse(chatBody) {
+  // bind one account to the whole multi-call flow
+  return als.run({ session: accountPool.next() || await getSession().catch(() => null) }, () => makeChatResponseInner(chatBody));
+}
+
+async function makeChatResponseInner(chatBody) {
   const start = Date.now();
   const raw = JSON.stringify(chatBody);
   let body;
@@ -525,19 +563,9 @@ async function makeChatResponse(chatBody) {
   let conversationId = sakanaReq.conversationId;
   let lastMessageId = '';
 
-  // Auto-context lookup
+  // Auto-context lookup — same first-user-message key as saveContext.
   if (!conversationId) {
-    const msgs = Array.isArray(body.messages) ? body.messages : [];
-    let prevUserMsg = '';
-    if (msgs.length > 1) {
-      for (let i = msgs.length - 2; i >= 0; i--) {
-        if (msgs[i] && msgs[i].role === 'user') {
-          const c = msgs[i].content;
-          prevUserMsg = typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => p.text || '').join(' ') : '');
-          break;
-        }
-      }
-    }
+    const prevUserMsg = firstUserText(body);
     const found = prevUserMsg ? lookupContext(prevUserMsg) : null;
     if (found) {
       conversationId = found.conversationId;
@@ -602,7 +630,7 @@ async function makeChatResponse(chatBody) {
         yield { event: 'chat.completion.chunk', data: fb };
       }
       stats.finish({ stream: true, ok: !streamError, model: modelName, promptChars, completionChars: 0, keyId: null });
-      saveContext(lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+      saveContext(firstUserText(body) || lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
       auditEntry({ method: 'POST', url: '/v1/responses', headers: {} }, body, streamError ? 500 : 200, null, streamError, Date.now() - start);
     })();
   }
@@ -642,7 +670,7 @@ async function makeChatResponse(chatBody) {
   const promptTokens = Math.round(promptChars / 4);
   const completionTokens = Math.round((text.length + reasoning.length) / 4);
   stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: null });
-  saveContext(lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+  saveContext(firstUserText(body) || lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
   const entry = auditEntry({ method: 'POST', url: '/v1/responses', headers: {} }, body, 200, { content: text.slice(0, 200) }, null, Date.now() - start);
   return { content: text, reasoning, conversationId, promptTokens, completionTokens };
 }
