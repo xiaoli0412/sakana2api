@@ -1,0 +1,46 @@
+{
+  "@context": "/contexts/Message",
+  "@id": "/messages/6a7da2b53f94f0a9943540c1",
+  "@type": "Message",
+  "id": "6a7da2b53f94f0a9943540c1",
+  "msgid": "<000000000000e391fe0658eb8b23@google.com>",
+  "from": {
+    "address": "noreply@chat.sakana.ai",
+    "name": ""
+  },
+  "to": [
+    {
+      "address": "sakmsrej2qt@emalupe.com",
+      "name": ""
+    }
+  ],
+  "cc": [],
+  "bcc": [],
+  "subject": "Sakana Chat へのログインが 2026 August 13 10:55 UTC にリクエストされました",
+  "intro": "お客様 このメールアドレスでの Sakana Chat へのログインのリクエストを 2026 August 13 10:55 UTC に受け付けました。sakmsrej2qt@emalupe.com…",
+  "seen": false,
+  "flagged": false,
+  "isDeleted": false,
+  "verifications": {
+    "tls": {
+      "name": "TLS_AES_256_GCM_SHA384",
+      "standardName": "TLS_AES_256_GCM_SHA384",
+      "version": "TLSv1.3"
+    },
+    "spf": false,
+    "dkim": false
+  },
+  "retention": true,
+  "retentionDate": "2026-08-20T10:55:49+00:00",
+  "text": "お客様\n\nこのメールアドレスでの Sakana Chat へのログインのリクエストを 2026 August 13 10:55 UTC に受け付けました。sakmsrej2qt@emalupe.com のアカウントでログインするには、こちらのリンクをクリックしてください。\n\nSakana Chat にログイン\n\nこのリンクをリクエストしていない場合は、このメールを無視してください。\n\nよろしくお願いいたします。\n\nSakana Chat チーム",
+  "html": [
+    "<p>お客様</p>\n<p>このメールアドレスでの Sakana Chat へのログインのリクエストを 2026 August 13 10:55 UTC に受け付けました。sakmsrej2qt@emalupe.com のアカウントでログインするには、こちらのリンクをクリックしてください。</p>\n<p><a href='https://sakana-talk.firebaseapp.com/__/auth/action?apiKey=AIzaSyBIJuyUokxGiETY0Nu3hQNC1dMadHyf_I4&amp;mode=signIn&amp;oobCode=p2e4hlXf82hd7TLebG-ejhEZAVvMDYNVbeDTeJUoD8IAAAGf-sONWw&amp;continueUrl=https://chat.sakana.ai/login&amp;lang=ja&amp;tenantId=sakana-talk-prd-pvl72'>Sakana Chat にログイン</a></p>\n<p>このリンクをリクエストしていない場合は、このメールを無視してください。</p>\n<p>よろしくお願いいたします。</p>\n<p>Sakana Chat チーム</p>"
+  ],
+  "hasAttachments": false,
+  "size": 4866,
+  "downloadUrl": "/messages/6a7da2b53f94f0a9943540c1/download",
+  "sourceUrl": "/sources/6a7da2b53f94f0a9943540c1",
+  "createdAt": "2026-08-13T10:55:47+00:00",
+  "updatedAt": "2026-08-13T10:55:49+00:00",
+  "accountId": "/accounts/6a7da288ecd0c8f32d0bb598"
+}

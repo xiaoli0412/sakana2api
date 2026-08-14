@@ -1,0 +1,41 @@
+{
+  "savedAt": 1786620209429,
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+  "cookieHeader": "sakana-chat=786d187c-c983-4997-8df6-fc617b453707; home_ascii_last=namazu; _dd_s=aid=447f630b-4a78-4ad2-9956-b2b09c99581d&rum=1&id=db8082eb-164c-46dd-a5ad-c4b2cecbd96d&created=1786620103095&expire=1786621003104&logs=1; cf_clearance=e1JQPrbTbKXyhDQOVUmc9HTt2FCW9eFbbpNRy_guxMI-1786620099-1.2.1.1-i351oFNYcT9eMtrtzvt3inhYZP1aic5QDWKvhzjMWRdoW24YXdvLkeEvaCC0pYlU9o4XZxLrWXyp2EcfL8y9QALlztX4t6SfH5hlAnRXoiHjsgO8P3_g.SAwhdIpnnU4q2jkssNyWe40XV46c3B3jDt_jBVL3DR6twHImlRPNRiabE__JmT7EfkQXrrPXvCn7TNbS77DDBprwnh99ybOPyuIAwnQhUXwhr.mKbI4IiqmU9s9jZrSbS9i5OfPCkhtjijKlOI805ylsNqC40xVaCfjYIkA0h5IrRx86AvqSuqKKbIw9LN4t4FCDC9L0dNH7L7dAKfI.a_y_LcVGrIfRlEcPUreef4Xn_tvIgFFVU4",
+  "cookies": [
+    {
+      "name": "sakana-chat",
+      "value": "786d187c-c983-4997-8df6-fc617b453707",
+      "domain": "chat.sakana.ai",
+      "path": "/",
+      "expires": 1787828476.110406,
+      "httpOnly": true
+    },
+    {
+      "name": "home_ascii_last",
+      "value": "namazu",
+      "domain": "chat.sakana.ai",
+      "path": "/",
+      "expires": 1818156103.073428,
+      "httpOnly": false
+    },
+    {
+      "name": "_dd_s",
+      "value": "aid=447f630b-4a78-4ad2-9956-b2b09c99581d&rum=1&id=db8082eb-164c-46dd-a5ad-c4b2cecbd96d&created=1786620103095&expire=1786621003104&logs=1",
+      "domain": "chat.sakana.ai",
+      "path": "/",
+      "expires": 1818156103,
+      "httpOnly": false
+    },
+    {
+      "name": "cf_clearance",
+      "value": "e1JQPrbTbKXyhDQOVUmc9HTt2FCW9eFbbpNRy_guxMI-1786620099-1.2.1.1-i351oFNYcT9eMtrtzvt3inhYZP1aic5QDWKvhzjMWRdoW24YXdvLkeEvaCC0pYlU9o4XZxLrWXyp2EcfL8y9QALlztX4t6SfH5hlAnRXoiHjsgO8P3_g.SAwhdIpnnU4q2jkssNyWe40XV46c3B3jDt_jBVL3DR6twHImlRPNRiabE__JmT7EfkQXrrPXvCn7TNbS77DDBprwnh99ybOPyuIAwnQhUXwhr.mKbI4IiqmU9s9jZrSbS9i5OfPCkhtjijKlOI805ylsNqC40xVaCfjYIkA0h5IrRx86AvqSuqKKbIw9LN4t4FCDC9L0dNH7L7dAKfI.a_y_LcVGrIfRlEcPUreef4Xn_tvIgFFVU4",
+      "domain": ".sakana.ai",
+      "path": "/",
+      "expires": 1818156103.174545,
+      "httpOnly": true
+    }
+  ],
+  "idToken": "",
+  "refreshToken": ""
+}

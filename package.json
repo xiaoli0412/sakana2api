@@ -1,0 +1,14 @@
+{
+  "name": "sakana-2api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenAI-compatible reverse proxy for the free chat.sakana.ai web chat (streaming, thinking, tools, web search, multimodal).",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "harvest": "node scripts/harvest.mjs",
+    "test:translate": "node tests/translate.test.mjs"
+  },
+  "engines": { "node": ">=22" },
+  "license": "MIT"
+}

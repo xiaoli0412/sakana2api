@@ -1,0 +1,13 @@
+import fs from 'fs';
+import { findPageTarget, CdpSession } from '../lib/cdp.js';
+const target = await findPageTarget();
+const sess = await CdpSession.connect(target.webSocketDebuggerUrl);
+const probe = await sess.evaluate('(async () => { const r = await fetch("/api/rate-limit/status",{headers:{"accept":"application/json"}}); return {status:r.status,body:(await r.text()).slice(0,100)}; })()');
+console.log('probe:', JSON.stringify(probe));
+const cookiesRaw = await sess.send('Network.getAllCookies').then(r => r.cookies || []);
+const cookies = cookiesRaw.filter(c => c.domain.includes('sakana.ai')).map(c => ({ name: c.name, value: c.value, domain: c.domain, path: c.path }));
+const cookieHeader = cookies.map(c => c.name + '=' + c.value).join('; ');
+const ua = await sess.evaluate('navigator.userAgent');
+fs.writeFileSync('../session.json', JSON.stringify({ savedAt: Date.now(), ua, cookieHeader, cookies, idToken: '', refreshToken: '' }, null, 2));
+console.log('session refreshed:', cookies.length, 'cookies');
+sess.close();

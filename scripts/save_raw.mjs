@@ -1,0 +1,10 @@
+import fs from 'fs';
+const { SakanaUpstream } = await import('../lib/upstream.js');
+const { loadSession } = await import('../lib/session.js');
+loadSession();
+const up = new SakanaUpstream(async () => loadSession());
+const boot = await up.createConversation({ toneMode: 'default', enableThinking: false, webSearchEnabled: true, model: 'sakana-namazu', inputs: '今天东京天气?一句话。' });
+const resp = await up.streamGenerate(boot.conversationId, { prompt: '今天东京天气?一句话。', toneMode: 'default', enableThinking: false, webSearchEnabled: true, sakanaModel: 'sakana-namazu' }, { lastMessageId: boot.systemMessageId });
+const full = await resp.text();
+fs.writeFileSync('raw_search_full.txt', full);
+console.log('saved, len:', full.length, 'lines:', full.split('\n').filter(Boolean).length);
