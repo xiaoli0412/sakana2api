@@ -5,7 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
-const { MODELS, openaiRequestToSakana, NdjsonTranslator, sse, clean, stripChips } = require('./lib/translate');
+const { MODELS, openaiRequestToSakana, NdjsonTranslator, sse, clean, stripChips, extractFileContent } = require('./lib/translate');
 const { SakanaUpstream, UpstreamError } = require('./lib/upstream');
 const { getSession, loadSession } = require('./lib/session');
 const { autoSession } = require('./lib/auto-session');
@@ -18,6 +18,31 @@ const AUTO_SESSION = process.env.AUTO_SESSION !== 'false'; // auto-bypass CF
 
 const stats = new Stats();
 const keyStore = new KeyStore();
+
+// Conversation context continuity: when a client sends multiple messages
+// without an explicit conversation_id, we try to match the last user input
+// to a recent conversation so the model remembers context.
+const CONTEXT_TTL = 24 * 60 * 60 * 1000; // 24h
+const contextMap = new Map(); // lastUserMsgHash -> { conversationId, ts }
+function hash(s) { return require('crypto').createHash('md5').update(s).digest('hex'); }
+function lookupContext(prevMsg) {
+  if (!prevMsg) return null;
+  const h = hash(prevMsg);
+  const entry = contextMap.get(h);
+  if (entry && Date.now() - entry.ts < CONTEXT_TTL) return entry.conversationId;
+  if (entry) contextMap.delete(h);
+  return null;
+}
+function saveContext(lastMsg, conversationId) {
+  if (!lastMsg) return;
+  const h = hash(lastMsg);
+  contextMap.set(h, { conversationId, ts: Date.now() });
+  // evict old entries
+  if (contextMap.size > 200) {
+    const old = [...contextMap.entries()].filter(([, e]) => Date.now() - e.ts > CONTEXT_TTL);
+    for (const [k] of old) contextMap.delete(k);
+  }
+}
 
 // built-in web UI (management panel; read per-request so edits apply live)
 const UI_HTML_PATH = path.join(__dirname, 'public', 'index.html');
@@ -80,8 +105,52 @@ async function handleChatCompletions(req, res) {
     stats.begin(modelName);
     const promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
 
+    // Extract text-based files (txt, md, csv, json, etc.) into the prompt.
+    // Images are left for the upstream multimodal model.
+    if (sakanaReq.files && sakanaReq.files.length > 0) {
+      const textParts = [];
+      const remaining = [];
+      for (const f of sakanaReq.files) {
+        const ext = extractFileContent(f);
+        if (ext === null) {
+          // image — keep for upstream
+          remaining.push(f);
+        } else if (ext.text) {
+          textParts.push(ext.text);
+        }
+        // else: unknown binary, skip
+      }
+      sakanaReq.files = remaining;
+      if (textParts.length) {
+        sakanaReq.prompt = (sakanaReq.prompt || '') + '\n\n--- 文件内容 ---\n' + textParts.join('\n');
+      }
+    }
+
     let conversationId = sakanaReq.conversationId;
     let lastMessageId = '';
+
+    // Try to auto-continue conversation context when client doesn't send conversation_id
+    if (!conversationId) {
+      // Find the second-to-last user message (previous context) for hash lookup
+      const msgs = Array.isArray(body.messages) ? body.messages : [];
+      let prevUserMsg = '';
+      let userCount = 0;
+      if (msgs.length > 1) {
+        for (let i = msgs.length - 2; i >= 0; i--) {
+          if (msgs[i] && msgs[i].role === 'user') {
+            const c = msgs[i].content;
+            prevUserMsg = typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => p.text || '').join(' ') : '');
+            break;
+          }
+        }
+      }
+      const found = prevUserMsg ? lookupContext(prevUserMsg) : null;
+      if (found) {
+        conversationId = found;
+        try { lastMessageId = await upstream.getLastMessageId(conversationId); } catch { conversationId = null; }
+      }
+    }
+
     if (!conversationId) {
       const boot = await upstream.createConversation({
         toneMode: sakanaReq.toneMode,
@@ -142,6 +211,7 @@ async function handleChatCompletions(req, res) {
       text = stripChips(text);
       text = text.trim();
       stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: req.keyId });
+      saveContext(sakanaReq.prompt, conversationId);
       return sendJson(res, 200, {
         id: 'chatcmpl-' + randomUUID().replace(/-/g, ''),
         object: 'chat.completion',
@@ -188,6 +258,7 @@ async function handleChatCompletions(req, res) {
     res.write('data: [DONE]\n\n');
     res.end();
     stats.finish({ stream: true, ok: true, model: modelName, promptChars, completionChars: streamedChars, keyId: req.keyId });
+    saveContext(sakanaReq.prompt, conversationId);
   } catch (e) {
     if (res.headersSent) { try { res.end(); } catch {} return; }
     stats.finish({ stream: false, ok: false, error: String(e.message || e), model: body.model || 'sakana-namazu', keyId: req.keyId });

@@ -26,6 +26,24 @@ console.log('== 1. OpenAI request -> Sakana bootstrap ==');
   check('model=sakana-namazu', r.sakanaModel === 'sakana-namazu', r.sakanaModel);
 }
 
+console.log('== 1b. hyphen model matrix parsing ==');
+{
+  const cases = [
+    ['sakana-namazu', { m: 'sakana-namazu', tone: 'default', think: false, search: true }],
+    ['sakana-namazu-osaka-thinking-search', { m: 'sakana-namazu', tone: 'osaka', think: false, search: true }],
+    ['sakana-namazu-thinking', { m: 'sakana-namazu', tone: 'default', think: true, search: false }],
+    ['sakana-namazu-search', { m: 'sakana-namazu', tone: 'default', think: false, search: true }],
+    ['sakana-fugu', { m: 'fugu', tone: 'default', think: false, search: true }],
+    ['sakana-fugu-polite-search', { m: 'fugu', tone: 'jp-vibes', think: false, search: true }],
+    ['sakana-fugu-osaka-thinking', { m: 'fugu', tone: 'osaka', think: true, search: false }],
+  ];
+  for (const [model, want] of cases) {
+    const r = openaiRequestToSakana({ model, messages: [] });
+    const got = { m: r.sakanaModel, tone: r.toneMode, think: r.enableThinking, search: r.webSearchEnabled };
+    check(`parse ${model}`, JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got));
+  }
+}
+
 console.log('== 2. multimodal image data url -> files ==');
 {
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]).toString('base64');

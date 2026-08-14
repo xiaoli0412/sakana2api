@@ -185,18 +185,7 @@
   </nav>
   <span class="spacer"></span>
   <label class="hidesm">模型
-    <select id="model">
-      <option value="sakana-namazu">Namazu</option>
-      <option value="sakana-namazu:standard">Namazu · Standard 🐟</option>
-      <option value="sakana-namazu:polite">Namazu · Polite 🐠</option>
-      <option value="sakana-namazu:osaka">Namazu · Osaka 🐙</option>
-    </select>
-  </label>
-  <label class="hidesm" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--dim)">
-    <input type="checkbox" id="think" style="accent-color:var(--acc)"> 思考
-  </label>
-  <label class="hidesm" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--dim)">
-    <input type="checkbox" id="search" style="accent-color:var(--acc)"> 搜索
+    <select id="model"><option value="sakana-namazu">加载中…</option></select>
   </label>
   <button class="iconbtn" id="newchat" title="新会话">＋</button>
 </header>
@@ -360,8 +349,6 @@ async function send() {
 
   const body = { model: $('model').value, messages: [{ role: 'user', content: (text && !savedFiles.length) ? text : content }], stream: true };
   if (conversationId) body.conversation_id = conversationId;
-  if ($('think').checked) body.reasoning_effort = 'medium';
-  if ($('search').checked) body.web_search = true;
 
   const aiBody = addMsg('assistant');
   aiBody.classList.add('typing');
@@ -638,6 +625,35 @@ $('keyCreate').onclick = async () => {
   refreshKeys();
 };
 
+/* load the full model matrix from the proxy (2 models × styles × think/search) */
+async function loadModels() {
+  try {
+    const r = await fetch('/v1/models');
+    const j = await r.json();
+    const list = (j.data || []).filter((m) => m.id);
+    if (!list.length) return;
+    const sel = $('model');
+    const groups = new Map();
+    for (const m of list) {
+      const g = m.id.startsWith('sakana-fugu') ? 'Fugu 🐡' : 'Namazu 🐟';
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(m);
+    }
+    sel.innerHTML = '';
+    for (const [g, ms] of groups) {
+      const og = document.createElement('optgroup');
+      og.label = g;
+      for (const m of ms) {
+        const op = document.createElement('option');
+        op.value = m.id;
+        op.textContent = m.id + ' — ' + (m.description || '').replace(/^[^·]+·\s*/, '');
+        og.appendChild(op);
+      }
+      sel.appendChild(og);
+    }
+  } catch { /* keep placeholder */ }
+}
+
 /* ---------- health ---------- */
 async function health() {
   try {
@@ -646,6 +662,7 @@ async function health() {
   } catch { $('dot').classList.add('err'); $('dot').classList.remove('ok'); $('status').textContent = '离线'; }
 }
 health();
+loadModels();
 setInterval(health, 30000);
 setInterval(() => { const p = document.querySelector('[data-pane="mon"]'); if (!p.hidden) refreshMon(); }, 10000);
 input.focus();
