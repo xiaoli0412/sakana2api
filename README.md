@@ -55,6 +55,8 @@
 | **文件上传** | `content: [{type:"file",...}]` | ✅ |
 | **自动过盾** | 无需任何操作 | ✅ 真实 Chromium 自动过 Cloudflare 5秒盾 |
 | **自动登录** | 无需任何操作 | ✅ 临时邮箱 + 魔法链接全自动注册登录 |
+| **Web 管理面板** | 浏览器打开 `http://<host>:8787/` | ✅ 聊天 / 监控 / 会话 / 密钥 |
+| **API Key 管理** | 面板内创建/撤销 | ✅ 一键开启 Bearer 鉴权 |
 
 ---
 
@@ -104,6 +106,17 @@ DISPLAY=:99 node server.js
 ```
 
 ### 3️⃣ 使用
+
+浏览器打开 **http://127.0.0.1:8787/** 即见管理面板(也可直接调用 API)。
+
+**面板四个 Tab:**
+
+| Tab | 功能 |
+|-----|------|
+| 💬 聊天 | 流式对话:模型/风格切换、思考链、Web 搜索、图片上传、多轮记忆 |
+| 📊 监控 | 请求数 / Token 用量 / 错误率、每模型条形图、上游会话状态(登录、cookie 时效) |
+| 🗂 会话 | 上游会话列表,点击查看完整消息历史 |
+| 🔑 密钥 | 创建 / 撤销 API Key(一次性显示密钥),开启后 API 需 `Authorization: Bearer <key>` |
 
 ```bash
 # 流式 + 思维链 + 搜索
@@ -187,19 +200,23 @@ for chunk in resp:
 
 ```
 sakana-2api/
-├── server.js           # 🚀 HTTP 服务入口 (OpenAI 兼容路由)
+├── server.js           # 🚀 HTTP 服务入口 (OpenAI 兼容路由 + 管理 API)
 ├── lib/
 │   ├── translate.js    # 🔄 协议翻译层 (OpenAI ↔ Sakana NDJSON)
 │   ├── upstream.js     # 📡 Sakana 内部 API 客户端
 │   ├── session.js      # 🔑 会话文件读写
 │   ├── auto-session.js # 🤖 全自动会话:过CF + 临时邮箱登录 + 收割 + 刷新
+│   ├── stats.js        # 📊 用量统计 + keys.json 密钥库
 │   └── cdp.js          # 🖥️ Chrome DevTools 协议客户端 (手动收割备用)
+├── public/
+│   └── index.html      # 🖥️ Web 管理面板 (聊天/监控/会话/密钥, 零依赖)
 ├── scripts/
 │   ├── harvest.mjs     # [备用] 从手动 Chrome 收割会话 cookie
 │   ├── complete_login.mjs  # [备用] 邮箱魔法链接 SDK 注入登录
+│   ├── upload_files.py # 服务器热更新脚本 (凭据在 gitignored .ssh_secret.json)
 │   └── verify_remote.py     # 部署后远程验证套件
 ├── tests/
-│   └── translate.test.mjs  # 18 项单元测试
+│   └── translate.test.mjs  # 19 项单元测试
 ├── protocol.md         # 📗 逆向协议文档
 └── README.md           # 本文件
 ```
@@ -209,10 +226,21 @@ sakana-2api/
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `PORT` | `8787` | 监听端口 |
-| `HOST` | `127.0.0.1` | 监听地址 |
-| `API_KEY` | – | 代理自身鉴权(Bearer),留空则开放 |
+| `HOST` | `127.0.0.1` | 监听地址(公网部署设为 `0.0.0.0` + 设置 API_KEY) |
+| `API_KEY` | – | 静态管理密钥(Bearer)。设置后密钥面板需用它解锁;未设置时面板直开 |
 | `AUTO_SESSION` | `true` | `false` 时走手动 session.json(不启动浏览器) |
 | `SAKANA_BASE` | `https://chat.sakana.ai` | 上游地址(测试用) |
+
+**鉴权模式(三态):**
+
+| 状态 | 行为 |
+|------|------|
+| 开放模式(默认) | 无 API_KEY 且无 Key → 所有接口免鉴权,面板直开 |
+| Key 模式 | 面板创建 ≥1 个 Key 后 → `/v1/*` 与 `/api/stats` 需 `Authorization: Bearer <key>` |
+| 管理锁 | 设置 `API_KEY` 环境变量后 → 密钥增删需用该静态密钥解锁;Key 仍可正常调用 API |
+
+> Key 存储于 `keys.json`(sha256 哈希,gitignored)。撤销全部 Key 后自动回到开放模式,
+> 不会锁死服务。`/` 与 `/health` 始终公开(供健康检查)。
 
 ---
 
