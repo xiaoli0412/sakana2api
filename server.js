@@ -187,24 +187,33 @@ async function handleChatCompletions(req, res) {
   try { body = JSON.parse(raw.toString('utf8')); }
   catch { const e = sendJson(res, 400, { error: { message: 'invalid JSON', type: 'invalid_request_error' } }); return; }
 
-  // A continuation (auto-context) MUST reuse the account that owns the
-  // conversation, or upstream 404s (CONV-NOTFOUND-001).
-  let boundAccount = null;
-  const prevText = firstUserText(body);
-  // Reuse the account bound to this conversation's creating request
-  const ctxEntry = prevText ? lookupContext(prevText) : null;
-  if (ctxEntry && ctxEntry.accountId) {
-    boundAccount = accountPool.get(ctxEntry.accountId) || null;
-  } else if (!ctxEntry) {
-    // New conversation: try to reuse the account from the previous turn if the
-    // client passes the same user text prefix (common multi-turn client).
-    const anyCtx = [...contextMap.values()][0];
+  const RETRYABLE = /CONV-NOTFOUND-001|RATE-LIMIT-001|AUTH-LOGIN-001|CF-403|UPSTREAM-TIMEOUT/;
+  for (let attempt = 0; ; attempt++) {
+    // A continuation (auto-context) MUST reuse the account that owns the
+    // conversation, or upstream 404s (CONV-NOTFOUND-001).
+    let boundAccount = null;
+    const prevText = firstUserText(body);
+    const ctxEntry = prevText ? lookupContext(prevText) : null;
+    if (ctxEntry && ctxEntry.accountId) {
+      boundAccount = accountPool.get(ctxEntry.accountId) || null;
+    }
+    if (!boundAccount) {
+      const acct = accountPool.next();
+      boundAccount = acct || await getSession().catch(() => null);
+    }
+    try {
+      return await als.run({ session: boundAccount, ctxEntry }, () => handleChatInner(req, res, body, start, ctxEntry));
+    } catch (e) {
+      const code = (e && (e.errorCode || e.code)) || '';
+      if (attempt === 0 && !res.headersSent && (!code || RETRYABLE.test(String(code) + ' ' + String(e.message)))) {
+        // Rotate the account and retry once (account pool分流/容错).
+        if (boundAccount && boundAccount.id) accountPool.markRateLimited(boundAccount.id);
+        console.log(`[chat] retrying with fresh account (${code || e.message})`);
+        continue;
+      }
+      throw e;
+    }
   }
-  if (!boundAccount) {
-    const acct = accountPool.next();
-    boundAccount = acct || await getSession().catch(() => null);
-  }
-  return als.run({ session: boundAccount, ctxEntry }, () => handleChatInner(req, res, body, start, ctxEntry));
 }
 
 /** inner handler (runs with request-bound session via AsyncLocalStorage) */
@@ -518,8 +527,22 @@ async function handleAnthropicMessages(req, res) {
  * promptTokens, completionTokens } or an AsyncGenerator of SSE chunks when stream.
  */
 async function makeChatResponse(chatBody) {
-  // bind one account to the whole multi-call flow
-  return als.run({ session: accountPool.next() || await getSession().catch(() => null) }, () => makeChatResponseInner(chatBody));
+  // bind one account to the whole multi-call flow; retry once on account-level errors
+  const RETRYABLE = /CONV-NOTFOUND-001|RATE-LIMIT-001|AUTH-LOGIN-001|CF-403|UPSTREAM-TIMEOUT/;
+  for (let attempt = 0; ; attempt++) {
+    const bound = await accountPool.next() || await getSession().catch(() => null);
+    try {
+      return await als.run({ session: bound }, () => makeChatResponseInner(chatBody));
+    } catch (e) {
+      const code = (e && (e.errorCode || e.code)) || '';
+      if (attempt === 0 && (!code || RETRYABLE.test(String(code) + ' ' + String(e.message)))) {
+        if (bound && bound.id) accountPool.markRateLimited(bound.id);
+        console.log('[makeChatResponse] retrying with fresh account (' + (code || e.message) + ')');
+        continue;
+      }
+      throw e;
+    }
+  }
 }
 
 async function makeChatResponseInner(chatBody) {
