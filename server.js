@@ -776,14 +776,66 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: { message: 'key not found' } });
     }
 
-    // Audit log endpoint
-    if (req.method === 'GET' && p === '/api/audit') {
-      return sendJson(res, 200, { entries: auditLog.slice(0, 100) });
+    // Audit log endpoints
+    if (req.method === 'GET' && (p === '/api/audit' || p === '/api/export-audit.csv')) {
+      if (p === '/api/export-audit.csv' || url.searchParams.get('format') === 'csv') {
+        const headers = ['id', 'ts', 'time_iso', 'method', 'path', 'model', 'status', 'duration_ms', 'error'];
+        const csvRows = [headers.join(',')];
+        for (const e of auditLog) {
+          const row = [
+            `"${e.id}"`,
+            e.ts,
+            `"${new Date(e.ts).toISOString()}"`,
+            `"${e.method}"`,
+            `"${e.path}"`,
+            `"${(e.model || '').replace(/"/g, '""')}"`,
+            e.status,
+            e.duration,
+            `"${(e.error || '').replace(/"/g, '""')}"`,
+          ];
+          csvRows.push(row.join(','));
+        }
+        const csvStr = '\uFEFF' + csvRows.join('\r\n');
+        res.writeHead(200, {
+          'content-type': 'text/csv; charset=utf-8',
+          'content-disposition': `attachment; filename="sakana-audit-${Date.now()}.csv"`,
+          'content-length': Buffer.byteLength(csvStr),
+        });
+        return res.end(csvStr);
+      }
+      return sendJson(res, 200, { entries: auditLog.slice(0, 150) });
+    }
+
+    if (req.method === 'POST' && p === '/api/audit/clear') {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
+      auditLog.length = 0;
+      return sendJson(res, 200, { ok: true });
     }
 
     // Accounts endpoint
     if (req.method === 'GET' && p === '/api/accounts') {
       return sendJson(res, 200, { accounts: accountPool.accounts, total: accountPool.count(), active: accountPool.activeCount() });
+    }
+
+    if (req.method === 'POST' && p === '/api/accounts/refresh') {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
+      try {
+        if (AUTO_SESSION) {
+          autoSession.harvestSession({ fresh: true }).then(s => {
+            if (s) accountPool.add(s);
+          }).catch(() => {});
+        }
+        return sendJson(res, 200, { ok: true, message: 'refresh triggered' });
+      } catch (e) {
+        return sendJson(res, 500, { error: { message: e.message } });
+      }
+    }
+
+    // Cache endpoints
+    if (req.method === 'POST' && p === '/api/cache/clear') {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
+      cache.clear();
+      return sendJson(res, 200, { ok: true, stats: cache.stats() });
     }
 
     return sendJson(res, 404, { error: { message: 'not found: ' + p, type: 'invalid_request_error' } });
