@@ -13,6 +13,7 @@ const { autoSession } = require('./lib/auto-session');
 const { Stats, KeyStore } = require('./lib/stats');
 const { AccountPool } = require('./lib/account-pool');
 const { Cache } = require('./lib/cache');
+const { concurrencyManager } = require('./lib/concurrency');
 
 // Bind ONE account to the whole request: createConversation + streamGenerate
 // must use the same session or the upstream 404s with CONV-NOTFOUND-001.
@@ -125,40 +126,87 @@ function markCurrentSession(err) {
   }
 }
 
-// Conversation context continuity (auto-continue: no need to pass conversation_id)
-const CONTEXT_TTL = 24 * 60 * 60 * 1000;
+// High-Affinity Conversation Context & Stickiness Manager
+const CONTEXT_TTL = 24 * 60 * 60 * 1000; // 24 hours
 const contextMap = new Map();
-function hash(s) { return require('crypto').createHash('md5').update(s).digest('hex'); }
-function lookupContext(prevMsg) {
-  if (!prevMsg) return null;
-  const h = hash(prevMsg);
-  const entry = contextMap.get(h);
-  if (entry && Date.now() - entry.ts < CONTEXT_TTL) return entry;
-  if (entry) contextMap.delete(h);
+function hash(s) { return require('crypto').createHash('md5').update(String(s)).digest('hex'); }
+
+function getContextKeys(req, body) {
+  const keys = [];
+  if (body && typeof body === 'object') {
+    const explicitId = body.conversation_id || body.chat_id || body.thread_id || (req && req.headers && (req.headers['x-conversation-id'] || req.headers['x-thread-id']));
+    if (explicitId) keys.push(`id:${explicitId}`);
+    const firstText = firstUserText(body);
+    if (firstText) {
+      keys.push(`text:${hash(firstText)}`);
+      keys.push(`model:${hash(firstText + ':' + (body.model || ''))}`);
+    }
+  }
+  return keys;
+}
+
+function lookupContext(req, body) {
+  // Backward compat: if req is a string (old signature `lookupContext(prevMsg)`)
+  if (typeof req === 'string') {
+    const h = hash(req);
+    const entry = contextMap.get(h);
+    if (entry && Date.now() - entry.ts < CONTEXT_TTL) return entry;
+    if (entry) contextMap.delete(h);
+    return null;
+  }
+  const keys = getContextKeys(req, body);
+  for (const k of keys) {
+    const entry = contextMap.get(k);
+    if (entry && Date.now() - entry.ts < CONTEXT_TTL) return entry;
+    if (entry) contextMap.delete(k);
+  }
   return null;
 }
-function saveContext(lastMsg, conversationId, lastMessageId) {
-  if (!lastMsg) return;
-  const h = hash(lastMsg);
+
+function saveContext(req, body, conversationId, lastMessageId, explicitAccountId = null) {
+  if (!conversationId) return;
+  // Backward compat: if req is a string (old signature `saveContext(lastMsg, ...)`)
+  // fall back to hashing it as a single key for the text-only context path.
+  if (typeof req === 'string') {
+    const h = hash(req);
+    const prev = contextMap.get(h);
+    contextMap.set(h, {
+      conversationId,
+      accountId: explicitAccountId || (prev && prev.accountId) || '',
+      lastMessageId: lastMessageId || (prev && prev.lastMessageId) || '',
+      ts: Date.now(),
+    });
+    if (contextMap.size > 10000) {
+      const now = Date.now();
+      for (const [k, e] of contextMap.entries()) if (now - e.ts > CONTEXT_TTL) contextMap.delete(k);
+    }
+    return;
+  }
   const bound = als.getStore();
-  const prev = contextMap.get(h);
-  contextMap.set(h, {
+  const accountId = explicitAccountId || (bound && bound.session && bound.session.id) || '';
+  const entry = {
     conversationId,
-    accountId: (bound && bound.session && bound.session.id) || (prev && prev.accountId) || '',
-    lastMessageId: lastMessageId || (prev && prev.lastMessageId) || '',
+    accountId,
+    lastMessageId: lastMessageId || '',
     ts: Date.now(),
-  });
-  if (contextMap.size > 200) {
-    const old = [...contextMap.entries()].filter(([, e]) => Date.now() - e.ts > CONTEXT_TTL);
-    for (const [k] of old) contextMap.delete(k);
+  };
+
+  const keys = getContextKeys(req, body);
+  keys.push(`id:${conversationId}`);
+  for (const k of keys) {
+    contextMap.set(k, entry);
+  }
+
+  // Auto-prune old entries when capacity exceeds 10,000
+  if (contextMap.size > 10000) {
+    const now = Date.now();
+    for (const [k, e] of contextMap.entries()) {
+      if (now - e.ts > CONTEXT_TTL) contextMap.delete(k);
+    }
   }
 }
 
 // Raw text of the FIRST user message in the request — the stable context key.
-// A multi-turn client sends the full history each time, so the first user
-// message identifies the conversation. (NOT the translated prompt: after
-// tool-hint injection sakanaReq.prompt no longer equals the client's user
-// text, which broke auto-continuation.)
 function lastUserText(body) {
   const msgs = Array.isArray(body.messages) ? body.messages : [];
   for (let i = msgs.length - 1; i >= 0; i--) {
@@ -187,32 +235,53 @@ async function handleChatCompletions(req, res) {
   try { body = JSON.parse(raw.toString('utf8')); }
   catch { const e = sendJson(res, 400, { error: { message: 'invalid JSON', type: 'invalid_request_error' } }); return; }
 
+  try {
+    await concurrencyManager.acquire(accountPool);
+  } catch (err) {
+    return sendJson(res, 429, { error: { message: 'Server busy: ' + err.message, type: 'rate_limit_error', code: 'SERVER-BUSY' } });
+  }
+
   const RETRYABLE = /CONV-NOTFOUND-001|RATE-LIMIT-001|AUTH-LOGIN-001|CF-403|UPSTREAM-TIMEOUT/;
-  for (let attempt = 0; ; attempt++) {
-    // A continuation (auto-context) MUST reuse the account that owns the
-    // conversation, or upstream 404s (CONV-NOTFOUND-001).
-    let boundAccount = null;
-    const prevText = firstUserText(body);
-    const ctxEntry = prevText ? lookupContext(prevText) : null;
-    if (ctxEntry && ctxEntry.accountId) {
-      boundAccount = accountPool.get(ctxEntry.accountId) || null;
-    }
-    if (!boundAccount) {
-      const acct = accountPool.next();
-      boundAccount = acct || await getSession().catch(() => null);
-    }
-    try {
-      return await als.run({ session: boundAccount, ctxEntry }, () => handleChatInner(req, res, body, start, ctxEntry));
-    } catch (e) {
-      const code = (e && (e.errorCode || e.code)) || '';
-      if (attempt === 0 && !res.headersSent && (!code || RETRYABLE.test(String(code) + ' ' + String(e.message)))) {
-        // Rotate the account and retry once (account pool分流/容错).
-        if (boundAccount && boundAccount.id) accountPool.markRateLimited(boundAccount.id);
-        console.log(`[chat] retrying with fresh account (${code || e.message})`);
-        continue;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      // 1. Check conversation context affinity
+      let boundAccount = null;
+      let ctxEntry = lookupContext(req, body);
+
+      if (ctxEntry && ctxEntry.accountId) {
+        const candidate = accountPool.get(ctxEntry.accountId);
+        if (candidate && candidate.state === 'active') {
+          boundAccount = candidate;
+        } else {
+          // Pinned account is rate-limited or expired -> transparently migrate conversation
+          ctxEntry = null; // Re-bootstrap fresh conversation on new account
+        }
       }
-      throw e;
+
+      if (!boundAccount) {
+        const acct = accountPool.next();
+        boundAccount = acct || await getSession().catch(() => null);
+      }
+
+      if (boundAccount && boundAccount.id) accountPool.acquire(boundAccount.id);
+      try {
+        const result = await als.run({ session: boundAccount, ctxEntry }, () => handleChatInner(req, res, body, start, ctxEntry));
+        if (boundAccount && boundAccount.id) accountPool.release(boundAccount.id, true);
+        return result;
+      } catch (e) {
+        if (boundAccount && boundAccount.id) accountPool.release(boundAccount.id, false);
+        const code = (e && (e.errorCode || e.code)) || '';
+        if (attempt === 0 && !res.headersSent && (!code || RETRYABLE.test(String(code) + ' ' + String(e.message)))) {
+          // Rotate the account and retry once (account pool分流/容错/热迁移).
+          if (boundAccount && boundAccount.id) accountPool.markRateLimited(boundAccount.id);
+          console.log(`[chat] migrating/retrying conversation with fresh account (${code || e.message})`);
+          continue;
+        }
+        throw e;
+      }
     }
+  } finally {
+    concurrencyManager.release();
   }
 }
 
@@ -289,43 +358,44 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       let text = '';
       let reasoning = '';
       const t = new NdjsonTranslator();
-      let prev = '';
+      const toolCalls = [];
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
         const s = decoder.decode(value, { stream: true });
         for (const line of s.split('\n')) {
           if (!line.trim()) continue;
-          let obj; try { obj = JSON.parse(line); } catch { continue; }
-          if (obj.type === 'reasoning') reasoning += clean(obj.token);
-          else if (obj.type === 'stream') {
-            const tok = clean(obj.token);
-            if (!tok) continue;
-            prev += tok;
-            text = prev;
-          } else if (obj.type === 'finalAnswer') {
-            const full = clean(obj.text);
-            if (!full) continue;
-            const len = Math.min(prev.length, full.length);
-            let i = 0;
-            while (i < len && prev[i] === full[i]) i++;
-            text = prev + full.slice(i);
-            prev = text;
+          for (const c of t.line(line)) {
+            const d = c.choices[0] && c.choices[0].delta;
+            if (d) {
+              if (d.content) text += d.content;
+              if (d.reasoning_content) reasoning += d.reasoning_content;
+              if (d.tool_calls) {
+                for (const tc of d.tool_calls) toolCalls.push(tc);
+              }
+            }
           }
         }
       }
-      text = stripChips(text).trim();
+      t.finish();
+      const finishReason = t.hasToolCalls ? 'tool_calls' : 'stop';
+      const msg = { role: 'assistant', content: text || null };
+      if (reasoning) msg.reasoning_content = reasoning;
+      if (toolCalls.length) msg.tool_calls = toolCalls;
       const response = {
-        id: 'chatcmpl-' + randomUUID().replace(/-/g, ''),
+        id: t.assistantMessageId,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: modelName,
         conversation_id: conversationId || undefined,
-        choices: [{ index: 0, message: { role: 'assistant', content: text || null, reasoning_content: reasoning || null }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: Math.round(promptChars / 4), completion_tokens: Math.round((text.length + reasoning.length) / 4), total_tokens: 0 },
+        choices: [{ index: 0, message: msg, finish_reason: finishReason }],
+        usage: { prompt_tokens: Math.round(promptChars / 4), completion_tokens: Math.round(((text || '').length + (reasoning || '').length) / 4), total_tokens: 0 },
       };
+      if (t.citations && t.citations.length) {
+        response.citations = t.citations;
+      }
       stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: req.keyId });
-      saveContext(firstUserText(body) || lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+      saveContext(req, body, conversationId, lastMessageId);
       if (cacheKey) cache.set(cacheKey, response);
       res.setHeader('x-conversation-id', conversationId || '');
       const entry = auditEntry(req, body, 200, response, null, Date.now() - start);
@@ -366,7 +436,11 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
         streamErrCode = 'EMPTY-RESPONSE';
       }
       if (!streamError) {
-        for (const c of t.finish()) res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
+        for (const c of t.finish()) {
+          const chunkData = { ...base, choices: c.choices };
+          if (c.citations && c.citations.length) chunkData.citations = c.citations;
+          res.write(sse('chat.completion.chunk', chunkData));
+        }
       }
     } catch (e) {
       streamError = e.message || String(e);
@@ -382,7 +456,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     } catch {}
     const ok = !streamError;
     stats.finish({ stream: true, ok, model: modelName, promptChars, completionChars: streamedChars, keyId: req.keyId });
-    saveContext(firstUserText(body) || lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+    saveContext(req, body, conversationId, lastMessageId);
     auditEntry(req, body, ok ? 200 : 500, null, streamError, Date.now() - start);
   } catch (e) {
     if (res.headersSent) { try { res.end(); } catch {} return; }
@@ -847,6 +921,11 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 500, { error: { message: String(e.message || e), type: 'internal_error' } });
   }
 });
+
+server.maxConnections = 2000;
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+server.requestTimeout = 300000;
 
 server.listen(PORT, HOST, async () => {
   console.log(`sakana-2api listening on http://${HOST}:${PORT}`);
