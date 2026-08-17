@@ -1395,7 +1395,7 @@
     <div class="topbar-left">
       <div class="topbar-title">
         <span id="pageHeaderTitle">仪表盘</span>
-        <span class="badge-tag" id="serverEnvTag">Sakana v0.1.0</span>
+        <span class="badge-tag" id="serverEnvTag">Sakana v0.9.0</span>
       </div>
       <div class="topbar-subtitle" id="pageHeaderSub">欢迎，Admin · 更新于 2026年8月16日 21:00</div>
     </div>
@@ -1672,6 +1672,7 @@
         <div>
           <div style="font-size:15px;font-weight:700;color:var(--text-main)">👤 上游账号池健康监控</div>
           <div style="font-size:12px;color:var(--text-dim)">多账号轮询分流 · 独立会话隔离 · 自动 5s 盾突破与保活</div>
+          <div id="accPoolStatus" style="font-size:12px;color:var(--text-main);margin-top:6px">目标 <b>20</b> · 上限 <b>20</b> · 最近收割 — · 状态获取中…</div>
         </div>
         <div style="display:flex;gap:8px">
           <button class="btn sm" id="btnTriggerHarvest">⚡ 触发账号补充/刷新</button>
@@ -1683,12 +1684,12 @@
         <div class="metric-card c-cyan">
           <div class="metric-head"><span class="metric-label">总账号容量</span><span class="metric-icon">👥</span></div>
           <div class="metric-val" id="accStatTotal">0</div>
-          <div class="metric-sub">池上限 10 账号</div>
+          <div class="metric-sub" id="accStatTotalSub">目标 20 · 上限 20 账号</div>
         </div>
         <div class="metric-card c-emerald">
           <div class="metric-head"><span class="metric-label">活跃可用</span><span class="metric-icon">✅</span></div>
           <div class="metric-val" id="accStatActive">0</div>
-          <div class="metric-sub">正常响应请求</div>
+          <div class="metric-sub" id="accStatActiveSub">正常响应请求</div>
         </div>
         <div class="metric-card c-amber">
           <div class="metric-head"><span class="metric-label">限流冷却</span><span class="metric-icon">⏳</span></div>
@@ -2909,6 +2910,17 @@ async function refreshAccounts() {
     $('accStatLimited').textContent = list.filter(a => a.state === 'rate_limited').length;
     $('accStatExpired').textContent = list.filter(a => a.state === 'expired').length;
 
+    // Pool target / harvest status line (real-time replenish feedback).
+    const target = json.target ?? 0, max = json.max ?? 0;
+    const totalCookies = list.reduce((n, a) => n + (a.cookieCount ?? (a.cookies || []).length), 0);
+    $('accStatTotalSub').textContent = `目标 ${target} · 上限 ${max} 账号`;
+    $('accStatActiveSub').textContent = `🍪 ${totalCookies} 个会话 Cookie · 90s 实时补充中`;
+    const lastHarv = json.lastHarvestAt ? fmtTime(Math.floor((Date.now() - json.lastHarvestAt) / 1000)) + ' 前' : '—';
+    const harvStatus = json.lastHarvestError
+      ? `<span class="pill rate">🛑 ${esc(String(json.lastHarvestError).slice(0, 60))}</span>`
+      : '<span class="pill on">✅ 收割正常</span>';
+    $('accPoolStatus').innerHTML = `目标 <b>${target}</b> · 上限 <b>${max}</b> · 最近收割 <b>${lastHarv}</b> · ${harvStatus}`;
+
     const tbody = $('accountRows');
     if (!list.length) {
       tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-dim)">账号池为空 — 点击右上角「触发账号补充」或等待后台自动 Harvest</td></tr>';
@@ -2940,8 +2952,10 @@ $('btnRefreshAccounts').onclick = () => { refreshAccounts(); toast('已刷新账
 $('btnTriggerHarvest').onclick = async () => {
   try {
     const res = await apiFetch('/api/accounts/refresh', { method: 'POST' });
-    if (res.ok) toast('已触发后台账号 Harvest 任务');
-    else toast('触发失败', 'err');
+    if (res.ok) {
+      toast('已触发账号 Harvest — 自动补充至目标数');
+      refreshAccounts();
+    } else toast('触发失败', 'err');
   } catch { toast('请求失败', 'err'); }
 };
 
@@ -3164,7 +3178,10 @@ initChat();
 refreshStats();
 checkHealth();
 setInterval(checkHealth, 20000);
-setInterval(() => { if (activeTab === 'dash') refreshStats(); }, 10000);
+setInterval(() => {
+  if (activeTab === 'dash') refreshStats();
+  if (activeTab === 'accounts') refreshAccounts();
+}, 10000);
 
 if (!chatSessions.length) createNewChatSession();
 else selectChatSession(chatSessions[0].id);

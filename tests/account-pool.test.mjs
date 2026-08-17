@@ -104,5 +104,49 @@ console.log('== account-pool regression tests ==');
   check('T5 save/load round-trip keeps all 10 same-uid distinct sessions', reloaded.count() === 10, `got ${reloaded.count()}`);
 }
 
+// ---- TEST 6: injectable min/max (20-account target) ----
+{
+  const dir = tmpDir();
+  const pool = new AccountPool(path.join(dir, 'account_pool.json'), path.join(dir, 'session.json'), { minPool: 20, maxPool: 20 });
+  check('T6 pool config exposes min/max 20', pool.minPool === 20 && pool.maxPool === 20, `min=${pool.minPool} max=${pool.maxPool}`);
+}
+
+// ---- async section: replenish-to-min behavior ----
+await (async () => {
+  // TEST 7: ensureMinPool harvests until the min target, retrying failures
+  {
+    const dir = tmpDir();
+    const pool = new AccountPool(path.join(dir, 'account_pool.json'), path.join(dir, 'session.json'), { minPool: 3, maxPool: 5 });
+    let calls = 0;
+    let failuresLeft = 2; // first two harvest attempts fail, then succeed
+    const harvestFn = () => {
+      calls++;
+      if (failuresLeft > 0) { failuresLeft--; throw new Error('harvest boom'); }
+      return { uid: 'uid-' + calls, email: `u${calls}@emalupe.com`, cookieHeader: `sakana-chat=sess-${calls}; x=y`, cookies: [], savedAt: Date.now(), state: 'active' };
+    };
+    await pool.ensureMinPool(harvestFn);
+    check('T7 retried failed harvests and reached min 3', pool.count() === 3, `count=${pool.count()} calls=${calls}`);
+    check('T7 harvest called for each slot incl. retries', calls >= 5, `calls=${calls}`); // 2 failures + 3 successes
+    const before = calls;
+    await pool.ensureMinPool(harvestFn);
+    check('T7 no extra harvest when at min', pool.count() === 3 && calls === before, `count=${pool.count()} calls=${calls}`);
+  }
+
+  // TEST 8: background replenish tick tops the pool up to min automatically
+  {
+    const dir = tmpDir();
+    const pool = new AccountPool(path.join(dir, 'account_pool.json'), path.join(dir, 'session.json'), { minPool: 3, maxPool: 5 });
+    let n = 0;
+    const harvestFn = () => {
+      n++;
+      return { uid: 'ruid-' + n, email: `r${n}@emalupe.com`, cookieHeader: `sakana-chat=rsess-${n}; x=y`, cookies: [], savedAt: Date.now(), state: 'active' };
+    };
+    pool.startBackground({ harvestFn, refreshFn: async () => null, replenishMs: 50 });
+    await new Promise((r) => setTimeout(r, 2000));
+    pool.stopBackground();
+    check('T8 replenish tick reached min 3 within ~2s', pool.count() === 3, `count=${pool.count()} harvestCalls=${n}`);
+  }
+})();
+
 console.log(failures ? `\nRESULT: ${failures} FAILED` : '\nRESULT: all passed');
 process.exit(failures ? 1 : 0);

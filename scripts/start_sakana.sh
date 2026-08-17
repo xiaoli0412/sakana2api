@@ -7,5 +7,8 @@
 cd /root/sakana-2api
 export DISPLAY=:99
 export HOST=0.0.0.0
+# 20-account pool: always keep ~20 REAL accounts, replenish in real time.
+export ACCOUNT_POOL_MIN=20
+export ACCOUNT_POOL_MAX=20
 nohup node server.js > server.log 2>&1 &
 echo started

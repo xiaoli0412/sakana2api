@@ -80,7 +80,7 @@ if DO_RESTART:
     print('kill:', out.strip(), err[:200])
     time.sleep(1.5)
     code, out, err = run(
-        f"cd {REMOTE} && setsid nohup bash -c 'DISPLAY=:99 node server.js > server.log 2>&1' > /dev/null 2>&1 & sleep 4 && echo STARTED && tail -3 server.log")
+        f"cd {REMOTE} && setsid nohup bash -c 'DISPLAY=:99 ACCOUNT_POOL_MIN=20 ACCOUNT_POOL_MAX=20 node server.js > server.log 2>&1' > /dev/null 2>&1 & sleep 4 && echo STARTED && tail -3 server.log")
     print('start:', out.strip(), err[:200])
     time.sleep(3)
     code, out, err = run("curl -s -m 8 http://127.0.0.1:8787/health; echo; curl -s -m 8 -H 'authorization: Bearer sk-sak-23e3bf82919da59eada7cacff83fc463332427093c159203' http://127.0.0.1:8787/api/accounts | head -c 200")

@@ -13,6 +13,7 @@ const { autoSession } = require('./lib/auto-session');
 const { Stats, KeyStore } = require('./lib/stats');
 const { AccountPool } = require('./lib/account-pool');
 const { Cache } = require('./lib/cache');
+const { ContextStore, firstUserText, lastUserText } = require('./lib/context');
 const { concurrencyManager } = require('./lib/concurrency');
 
 // Bind ONE account to the whole request: createConversation + streamGenerate
@@ -117,114 +118,96 @@ function isAdmin(req) {
 function markCurrentSession(err) {
   const sess = upstream.lastSession;
   if (!sess) return;
-  if (err && (err.errorCode === 'AUTH-LOGIN-001' || err.errorCode === 'RATE-LIMIT-001')) {
-    if (sess.id) accountPool.markRateLimited(sess.id);
-    else accountPool.markRateLimited(sess.id);
+  let marked = false;
+  if (err && err.errorCode === 'AUTH-LOGIN-001') {
+    // Login gone on the Sakana side: the account itself is dead — expire it so
+    // a fresh harvest replaces it, instead of waiting out a cooldown.
+    if (sess.id) { accountPool.markExpired(sess.id); marked = true; }
+  }
+  if (err && err.errorCode === 'RATE-LIMIT-001') {
+    if (sess.id) { accountPool.markRateLimited(sess.id); marked = true; }
   }
   if (err && (err.errorCode === 'CF-403' || err.errorCode === 'AUTH-TOKEN-001')) {
-    if (sess.id) accountPool.markExpired(sess.id);
+    if (sess.id) { accountPool.markExpired(sess.id); marked = true; }
   }
+  // Event-driven top-up: don't wait for the 90s replenish tick after a failure.
+  if (marked && accountPool._harvestFn) {
+    accountPool.scheduleReplenish(accountPool._harvestFn);
+  }
+}
+
+// ---- native tool-round continuation ---------------------------------------
+// Upstream can end an image/file-analysis turn with sandbox tool calls and NO
+// final text (its own flake). The web frontend handles this by sending
+// is_continue until the model emits its real answer; the proxy must do the
+// same transparently instead of leaking an empty completion to clients.
+const MAX_TOOL_CONTINUE_ROUNDS = parseInt(process.env.MAX_TOOL_CONTINUE_ROUNDS || '2', 10);
+
+/**
+ * Drain one upstream NDJSON generation stream through a translator.
+ * Returns aggregates + translator state needed to decide whether the turn
+ * needs continuation. Optional onChunk is called with every translated chunk
+ * (used by streaming callers to write SSE as lines arrive).
+ */
+async function drainUpstreamRound(resp, translator, onChunk) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const agg = { content: '', reasoning: '', toolCalls: [] };
+  const absorb = (chunks) => {
+    for (const c of chunks) {
+      if (onChunk) onChunk(c);
+      const d = c.choices[0] && c.choices[0].delta;
+      if (!d) continue;
+      if (d.content) agg.content += d.content;
+      if (d.reasoning_content) agg.reasoning += d.reasoning_content;
+      if (d.tool_calls) agg.toolCalls.push(...d.tool_calls);
+    }
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) { buf += decoder.decode(); break; }
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n'); buf = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      absorb(translator.line(line));
+    }
+  }
+  if (buf.trim()) absorb(translator.line(buf));
+  return { t: translator, ...agg };
+}
+
+/**
+ * is_continue round: reference the conversation's current leaf message and
+ * send NO inputs/files — the sandbox already holds the attachments.
+ */
+async function continueNativeToolRound(conversationId, sakanaReq) {
+  const leaf = await upstream.getLastMessageId(conversationId);
+  const contReq = { ...sakanaReq, isContinue: true, prompt: undefined, files: [] };
+  const resp = await upstream.streamGenerate(conversationId, contReq, { lastMessageId: leaf });
+  return drainUpstreamRound(resp, new NdjsonTranslator());
 }
 
 // High-Affinity Conversation Context & Stickiness Manager
-const CONTEXT_TTL = 24 * 60 * 60 * 1000; // 24 hours
-const contextMap = new Map();
-function hash(s) { return require('crypto').createHash('md5').update(String(s)).digest('hex'); }
-
-function getContextKeys(req, body) {
-  const keys = [];
-  if (body && typeof body === 'object') {
-    const explicitId = body.conversation_id || body.chat_id || body.thread_id || (req && req.headers && (req.headers['x-conversation-id'] || req.headers['x-thread-id']));
-    if (explicitId) keys.push(`id:${explicitId}`);
-    const firstText = firstUserText(body);
-    if (firstText) {
-      keys.push(`text:${hash(firstText)}`);
-      keys.push(`model:${hash(firstText + ':' + (body.model || ''))}`);
-    }
-  }
-  return keys;
-}
+// Backed by lib/context.js (ContextStore, unit-tested). These thin wrappers
+// keep the legacy call shapes AND bind the request-scoped account via
+// AsyncLocalStorage when the caller doesn't pass one explicitly.
+const contextStore = new ContextStore();
 
 function lookupContext(req, body) {
-  // Backward compat: if req is a string (old signature `lookupContext(prevMsg)`)
-  if (typeof req === 'string') {
-    const h = hash(req);
-    const entry = contextMap.get(h);
-    if (entry && Date.now() - entry.ts < CONTEXT_TTL) return entry;
-    if (entry) contextMap.delete(h);
-    return null;
-  }
-  const keys = getContextKeys(req, body);
-  for (const k of keys) {
-    const entry = contextMap.get(k);
-    if (entry && Date.now() - entry.ts < CONTEXT_TTL) return entry;
-    if (entry) contextMap.delete(k);
-  }
-  return null;
+  if (typeof req === 'string') return contextStore.lookup(req);
+  return contextStore.lookup(req, body);
 }
 
 function saveContext(req, body, conversationId, lastMessageId, explicitAccountId = null) {
   if (!conversationId) return;
-  // Backward compat: if req is a string (old signature `saveContext(lastMsg, ...)`)
-  // fall back to hashing it as a single key for the text-only context path.
   if (typeof req === 'string') {
-    const h = hash(req);
-    const prev = contextMap.get(h);
-    contextMap.set(h, {
-      conversationId,
-      accountId: explicitAccountId || (prev && prev.accountId) || '',
-      lastMessageId: lastMessageId || (prev && prev.lastMessageId) || '',
-      ts: Date.now(),
-    });
-    if (contextMap.size > 10000) {
-      const now = Date.now();
-      for (const [k, e] of contextMap.entries()) if (now - e.ts > CONTEXT_TTL) contextMap.delete(k);
-    }
-    return;
+    return contextStore.save(req, undefined, conversationId, lastMessageId, explicitAccountId);
   }
   const bound = als.getStore();
   const accountId = explicitAccountId || (bound && bound.session && bound.session.id) || '';
-  const entry = {
-    conversationId,
-    accountId,
-    lastMessageId: lastMessageId || '',
-    ts: Date.now(),
-  };
-
-  const keys = getContextKeys(req, body);
-  keys.push(`id:${conversationId}`);
-  for (const k of keys) {
-    contextMap.set(k, entry);
-  }
-
-  // Auto-prune old entries when capacity exceeds 10,000
-  if (contextMap.size > 10000) {
-    const now = Date.now();
-    for (const [k, e] of contextMap.entries()) {
-      if (now - e.ts > CONTEXT_TTL) contextMap.delete(k);
-    }
-  }
-}
-
-// Raw text of the FIRST user message in the request — the stable context key.
-function lastUserText(body) {
-  const msgs = Array.isArray(body.messages) ? body.messages : [];
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const m = msgs[i];
-    if (!m || m.role !== 'user') continue;
-    const c = m.content;
-    return typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => p && (p.text || p.content || '')).join(' ') : '');
-  }
-  return '';
-}
-function firstUserText(body) {
-  const msgs = Array.isArray(body.messages) ? body.messages : [];
-  for (const m of msgs) {
-    if (!m || m.role !== 'user') continue;
-    const c = m.content;
-    return typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => p && (p.text || p.content || '')).join(' ') : '');
-  }
-  return '';
+  return contextStore.save(req, body, conversationId, lastMessageId, accountId);
 }
 
 /** main: POST /v1/chat/completions */
@@ -351,34 +334,34 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     }
 
     const upResp = await upstream.streamGenerate(conversationId, sakanaReq, { lastMessageId });
-    const reader = upResp.body.getReader();
-    const decoder = new TextDecoder();
 
     if (!streaming) {
       let text = '';
       let reasoning = '';
-      const t = new NdjsonTranslator();
       const toolCalls = [];
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        const s = decoder.decode(value, { stream: true });
-        for (const line of s.split('\n')) {
-          if (!line.trim()) continue;
-          for (const c of t.line(line)) {
-            const d = c.choices[0] && c.choices[0].delta;
-            if (d) {
-              if (d.content) text += d.content;
-              if (d.reasoning_content) reasoning += d.reasoning_content;
-              if (d.tool_calls) {
-                for (const tc of d.tool_calls) toolCalls.push(tc);
-              }
-            }
-          }
-        }
+      const first = await drainUpstreamRound(upResp, new NdjsonTranslator());
+      text += first.content;
+      reasoning += first.reasoning;
+      toolCalls.push(...first.toolCalls);
+      let t = first.t;
+
+      // Transparent native-tool continuation: upstream sometimes ends an
+      // image/file-analysis turn with tool calls but NO final text. The real
+      // frontend sends is_continue until the model emits its answer — do the
+      // same here, invisibly, up to MAX_TOOL_CONTINUE_ROUNDS.
+      let rounds = 0;
+      while (!text && t.nativeToolRound && !t.clientToolRound && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
+        rounds++;
+        let cont;
+        try { cont = await continueNativeToolRound(conversationId, sakanaReq); }
+        catch (e) { console.log('[tool-continue] continue round failed:', String(e.message || e).slice(0, 120)); break; }
+        text += cont.content;
+        reasoning += cont.reasoning;
+        toolCalls.push(...cont.toolCalls);
+        t = cont.t;
       }
-      t.finish();
-      const finishReason = t.hasToolCalls ? 'tool_calls' : 'stop';
+
+      const finishReason = toolCalls.length && !text ? 'tool_calls' : 'stop';
       const msg = { role: 'assistant', content: text || null };
       if (reasoning) msg.reasoning_content = reasoning;
       if (toolCalls.length) msg.tool_calls = toolCalls;
@@ -408,27 +391,34 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     const t = new NdjsonTranslator();
     let streamedChars = 0;
     const base = { id: t.assistantMessageId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: modelName };
-    let buf = '';
     let streamError = null;
     let streamErrCode = null;
     try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split('\n');
-        buf = lines.pop() || '';
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          for (const c of t.line(line)) {
-            const d = c.choices[0] && c.choices[0].delta;
-            if (d && d.content) streamedChars += d.content.length;
-            res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
-          }
+      const onChunk = (c) => {
+        const d = c.choices[0] && c.choices[0].delta;
+        if (d && d.content) streamedChars += d.content.length;
+        res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
+      };
+      await drainUpstreamRound(upResp, t, onChunk);
+      // Native tool round with no text: continue transparently (same as the
+      // non-stream path) so stream clients aren't cut off mid-analysis.
+      let rounds = 0;
+      while (!t.sentContent && t.nativeToolRound && !t.clientToolRound && !streamError && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
+        rounds++;
+        try {
+          const contT = new NdjsonTranslator();
+          const leaf = await upstream.getLastMessageId(conversationId);
+          const contReq = { ...sakanaReq, isContinue: true, prompt: undefined, files: [] };
+          const contResp = await upstream.streamGenerate(conversationId, contReq, { lastMessageId: leaf });
+          await drainUpstreamRound(contResp, contT, onChunk);
+          if (!contT.sentContent) { t.nativeToolRound = contT.nativeToolRound; continue; }
+          // Text arrived in the continuation round — finish with that translator.
+          t = contT;
+        } catch (e) {
+          streamError = String(e.message || e).slice(0, 150);
+          streamErrCode = e.errorCode || 'TOOL-CONTINUE-FAILED';
+          break;
         }
-      }
-      if (buf.trim()) {
-        for (const c of t.line(buf)) res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
       }
       // Empty upstream output = silent failure (user typed, nothing came back).
       if (!t.sentContent && !streamError) {
@@ -834,13 +824,13 @@ const server = http.createServer(async (req, res) => {
         active: accountPool.activeCount(),
         limited: poolList.filter(a => a.state === 'rate_limited').length,
         expired: poolList.filter(a => a.state === 'expired').length,
-        max: 10,
+        max: accountPool.maxPool,
         inFlight: poolList.reduce((n, a) => n + (a.inFlight || 0), 0),
       };
       s.auditCount = auditLog.length;
       s.ops = {
         concurrency: concurrencyManager.stats,
-        contextCount: contextMap.size,
+        contextCount: contextStore.size,
         uptimeSec: Math.floor((Date.now() - stats.startedAt) / 1000),
         mem: { rssMB: Math.round(mem.rss / 1048576), heapMB: Math.round(mem.heapUsed / 1048576), heapMaxMB: Math.round(mem.heapTotal / 1048576) },
         node: process.version,
@@ -923,18 +913,27 @@ const server = http.createServer(async (req, res) => {
         cookieCount: (a.cookies || []).length,
         rateLimitedAt: a.rateLimitedAt || 0,
       }));
-      return sendJson(res, 200, { accounts: safe, total: accountPool.count(), active: accountPool.activeCount() });
+      return sendJson(res, 200, {
+        accounts: safe,
+        total: accountPool.count(),
+        active: accountPool.activeCount(),
+        target: accountPool.minPool,
+        max: accountPool.maxPool,
+        lastHarvestAt: accountPool.lastHarvestAt,
+        lastHarvestError: accountPool.lastHarvestError,
+      });
     }
 
     if (req.method === 'POST' && p === '/api/accounts/refresh') {
       if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
       try {
         if (AUTO_SESSION) {
-          autoSession.harvestSession({ fresh: true }).then(s => {
-            if (s) accountPool.add(s);
-          }).catch(() => {});
+          // Serialized fresh harvest + full replenish to the 20-account target.
+          accountPool.ensureMinPool(() => autoSession.harvestFresh())
+            .then((ok) => console.log(`[accounts] manual refresh harvested ${ok} accounts`))
+            .catch((e) => console.log('[accounts] manual refresh error:', String(e.message || e).slice(0, 150)));
         }
-        return sendJson(res, 200, { ok: true, message: 'refresh triggered' });
+        return sendJson(res, 200, { ok: true, message: 'refresh + replenish triggered' });
       } catch (e) {
         return sendJson(res, 500, { error: { message: e.message } });
       }
@@ -978,15 +977,15 @@ server.listen(PORT, HOST, async () => {
       loadSession();
     }
     // Background keeper MUST run regardless of the bootstrap outcome: it
-    // refreshes cookies and replenishes the pool to MIN_POOL (10) with fresh
+    // refreshes cookies and replenishes the pool to minPool (20) with fresh
     // accounts. Only autoSession functions are gated by AUTO_SESSION.
     accountPool.startBackground({
-      harvestFn: async () => autoSession.harvestSession({ fresh: true }),
+      harvestFn: () => autoSession.harvestFresh(),
       refreshFn: (acct) => autoSession.refreshAccount(acct),
     });
-    console.log('[account-pool] background keeper started (every', String(process.env.ACCOUNT_REFRESH_MS || '20min'), ')');
+    console.log(`[account-pool] background keeper started (refresh every ${String(process.env.ACCOUNT_REFRESH_MS || '20min')}, replenish every ${String(process.env.ACCOUNT_REPLENISH_MS || '90s')}, target ${accountPool.minPool})`);
     // Kick off an immediate replenish instead of waiting a full cycle.
-    accountPool.ensureMinPool(async () => autoSession.harvestSession({ fresh: true }))
+    accountPool.ensureMinPool(() => autoSession.harvestFresh())
       .catch(e => console.log('[startup] pool replenish:', e.message));
   } else {
     const s = loadSession();

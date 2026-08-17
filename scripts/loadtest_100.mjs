@@ -38,7 +38,7 @@ async function oneRequest(i) {
       let buf = '';
       for (;;) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done) { buf += dec.decode(); break; }
         buf += dec.decode(value, { stream: true });
         const lines = buf.split('\n');
         buf = lines.pop();
@@ -46,6 +46,17 @@ async function oneRequest(i) {
           if (!line.startsWith('data:')) continue;
           const payload = line.slice(5).trim();
           if (!payload || payload === '[DONE]') continue;
+          try {
+            const obj = JSON.parse(payload);
+            const ch = obj.choices?.[0];
+            if (ch?.delta?.content) outText += ch.delta.content;
+            if (ch?.finish_reason) finishReason = ch.finish_reason;
+          } catch {}
+        }
+      }
+      if (buf.startsWith('data:')) {
+        const payload = buf.slice(5).trim();
+        if (payload && payload !== '[DONE]') {
           try {
             const obj = JSON.parse(payload);
             const ch = obj.choices?.[0];

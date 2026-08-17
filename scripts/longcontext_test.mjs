@@ -32,7 +32,7 @@ async function chat(body, timeoutMs = 180000) {
       let buf = '';
       for (;;) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done) { buf += dec.decode(); break; }
         buf += dec.decode(value, { stream: true });
         const lines = buf.split('\n');
         buf = lines.pop();
@@ -44,6 +44,12 @@ async function chat(body, timeoutMs = 180000) {
             const o = JSON.parse(pl);
             if (o.choices?.[0]?.delta?.content) text += o.choices[0].delta.content;
           } catch {}
+        }
+      }
+      if (buf.startsWith('data:')) {
+        const pl = buf.slice(5).trim();
+        if (pl && pl !== '[DONE]') {
+          try { const o = JSON.parse(pl); if (o.choices?.[0]?.delta?.content) text += o.choices[0].delta.content; } catch {}
         }
       }
     } else {
