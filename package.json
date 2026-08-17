@@ -1,6 +1,6 @@
 {
   "name": "sakana-2api",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
   "description": "OpenAI-compatible reverse proxy for the free chat.sakana.ai web chat (streaming, thinking, tools, web search, multimodal).",
   "main": "server.js",
