@@ -144,6 +144,33 @@ function markCurrentSession(err) {
 const MAX_TOOL_CONTINUE_ROUNDS = parseInt(process.env.MAX_TOOL_CONTINUE_ROUNDS || '2', 10);
 
 /**
+ * Generator variant of drainUpstreamRound for SSE producers: yields one
+ * chat.completion.chunk event per translated chunk, live, as lines arrive.
+ * (yield is not legal inside the plain onChunk callback used by the
+ * non-stream/stream-write paths, so generators get their own reader loop.)
+ */
+async function* drainRoundToSSE(resp, translator, base) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) { buf += decoder.decode(); break; }
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n'); buf = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      for (const c of translator.line(line)) {
+        yield { event: 'chat.completion.chunk', data: { ...base, choices: c.choices } };
+      }
+    }
+  }
+  if (buf.trim()) {
+    for (const c of translator.line(buf)) yield { event: 'chat.completion.chunk', data: { ...base, choices: c.choices } };
+  }
+}
+
+/**
  * Drain one upstream NDJSON generation stream through a translator.
  * Returns aggregates + translator state needed to decide whether the turn
  * needs continuation. Optional onChunk is called with every translated chunk
@@ -186,7 +213,7 @@ async function continueNativeToolRound(conversationId, sakanaReq) {
   const leaf = await upstream.getLastMessageId(conversationId);
   const contReq = { ...sakanaReq, isContinue: true, prompt: undefined, files: [] };
   const resp = await upstream.streamGenerate(conversationId, contReq, { lastMessageId: leaf });
-  return drainUpstreamRound(resp, new NdjsonTranslator());
+  return { ...(await drainUpstreamRound(resp, new NdjsonTranslator())), leaf };
 }
 
 // High-Affinity Conversation Context & Stickiness Manager
@@ -350,7 +377,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       // frontend sends is_continue until the model emits its answer — do the
       // same here, invisibly, up to MAX_TOOL_CONTINUE_ROUNDS.
       let rounds = 0;
-      while (!text && t.nativeToolRound && !t.clientToolRound && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
+      while (!text && !t.clientToolRound && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
         rounds++;
         let cont;
         try { cont = await continueNativeToolRound(conversationId, sakanaReq); }
@@ -359,6 +386,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
         reasoning += cont.reasoning;
         toolCalls.push(...cont.toolCalls);
         t = cont.t;
+        lastMessageId = cont.leaf;
       }
 
       const finishReason = toolCalls.length && !text ? 'tool_calls' : 'stop';
@@ -403,7 +431,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       // Native tool round with no text: continue transparently (same as the
       // non-stream path) so stream clients aren't cut off mid-analysis.
       let rounds = 0;
-      while (!t.sentContent && t.nativeToolRound && !t.clientToolRound && !streamError && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
+      while (!t.sentContent && !t.clientToolRound && !streamError && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
         rounds++;
         try {
           const contT = new NdjsonTranslator();
@@ -682,32 +710,26 @@ async function makeChatResponseInner(chatBody) {
   }
 
   const upResp = await upstream.streamGenerate(conversationId, sakanaReq, { lastMessageId });
-  const reader = upResp.body.getReader();
-  const decoder = new TextDecoder();
   const t = new NdjsonTranslator();
 
   if (streaming) {
     // Return SSE chunk generator, mirroring chat path but as async iterable.
     const base = { id: t.assistantMessageId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: modelName };
     return (async function* () {
-      let buf = '';
       let streamError = null;
       try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split('\n');
-          buf = lines.pop() || '';
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            for (const c of t.line(line)) {
-              yield { event: 'chat.completion.chunk', data: { ...base, choices: c.choices } };
-            }
-          }
-        }
-        if (buf.trim()) {
-          for (const c of t.line(buf)) yield { event: 'chat.completion.chunk', data: { ...base, choices: c.choices } };
+        for await (const ev of drainRoundToSSE(upResp, t, base)) yield ev;
+        // Native tool round with no text: continue transparently.
+        let rounds = 0;
+        while (!t.sentContent && !t.clientToolRound && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
+          rounds++;
+          const contT = new NdjsonTranslator();
+          const leaf = await upstream.getLastMessageId(conversationId);
+          const contReq = { ...sakanaReq, isContinue: true, prompt: undefined, files: [] };
+          const contResp = await upstream.streamGenerate(conversationId, contReq, { lastMessageId: leaf });
+          for await (const ev of drainRoundToSSE(contResp, contT, base)) yield ev;
+          if (!contT.sentContent) { t.nativeToolRound = contT.nativeToolRound; continue; }
+          t = contT;
         }
         if (!t.sentContent) {
           streamError = 'empty response';
@@ -726,35 +748,20 @@ async function makeChatResponseInner(chatBody) {
   }
 
   // non-stream: accumulate
-  let text = '';
-  let reasoning = '';
-  let prev = '';
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    const s = decoder.decode(value, { stream: true });
-    for (const line of s.split('\n')) {
-      if (!line.trim()) continue;
-      let obj; try { obj = JSON.parse(line); } catch { continue; }
-      if (obj.type === 'reasoning') reasoning += clean(obj.token);
-      else if (obj.type === 'stream') {
-        const tok = clean(obj.token);
-        if (!tok) continue;
-        prev += tok;
-        text = prev;
-      } else if (obj.type === 'finalAnswer') {
-        const full = clean(obj.text);
-        if (!full) continue;
-        if (full.startsWith(text)) text = full;
-        else {
-          const len = Math.min(prev.length, full.length);
-          let i = 0;
-          while (i < len && prev[i] === full[i]) i++;
-          text = prev + full.slice(i);
-          prev = text;
-        }
-      }
-    }
+  const first = await drainUpstreamRound(upResp, new NdjsonTranslator());
+  let text = first.content;
+  let reasoning = first.reasoning;
+  let finalT = first.t;
+  // Transparent native-tool continuation (same rule as chat path).
+  let rounds = 0;
+  while (!text && !finalT.clientToolRound && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
+    rounds++;
+    try {
+      const cont = await continueNativeToolRound(conversationId, sakanaReq);
+      text += cont.content;
+      reasoning += cont.reasoning;
+      finalT = cont.t;
+    } catch (e) { console.log('[tool-continue] (responses) continue round failed:', String(e.message || e).slice(0, 120)); break; }
   }
   text = stripChips(text).trim();
   const promptTokens = Math.round(promptChars / 4);
