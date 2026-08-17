@@ -6,6 +6,8 @@ mailtoken.json
 mailmsg.json
 success_sample.json
 raw_search*.txt
+account_pool.json
+account_pool.remote.json
 
 # Chrome user data dir
 .chrome-sakana-profile/

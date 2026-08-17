@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sakana2API · 高性能 AI 网关与控制台</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐟</text></svg>">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cascadia+Code:wght@400;600&family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -1287,10 +1288,58 @@
     line-height: 1.5;
   }
 
+  .ops-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+  .ops-item {
+    background: var(--bg-card, #0b1119);
+    border: 1px solid var(--border-card, rgba(148,163,184,0.14));
+    border-radius: 10px;
+    padding: 10px 14px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .ops-label { font-size: 11px; color: var(--text-dim, #64748b); }
+  .ops-val { font-size: 16px; font-weight: 700; color: var(--text-main, #e2e8f0); font-variant-numeric: tabular-nums; }
+
   [hidden] { display: none !important; }
+
+  .admin-lock-overlay {
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(3, 6, 12, 0.82);
+    backdrop-filter: blur(6px);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .admin-lock-card {
+    background: var(--bg-card, #0b1119);
+    border: 1px solid var(--border-card, rgba(148,163,184,0.14));
+    border-radius: 16px;
+    padding: 28px 30px;
+    max-width: 480px; width: calc(100vw - 48px);
+    text-align: center;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+  }
 </style>
 </head>
 <body>
+
+<!-- ================= 全局管理员解锁遮罩 (任意面板 401 时弹出) ================= -->
+<div id="globalAdminLock" class="admin-lock-overlay" hidden>
+  <div class="admin-lock-card">
+    <div style="font-size:36px;margin-bottom:10px">🔐</div>
+    <div style="font-size:16px;font-weight:700;margin-bottom:6px">管理员密钥验证</div>
+    <div style="font-size:12.5px;color:var(--text-muted);margin-bottom:18px;line-height:1.6">
+      服务已启用 API Key 认证,运维面板需要管理员密钥才能查看。<br>
+      输入部署时设置的 API_KEY 或已创建的管理员 Token。
+    </div>
+    <div style="display:flex;gap:8px">
+      <input type="password" class="input-text" id="adminKeyInput" placeholder="输入 API_KEY 或管理员 Token" style="flex:1">
+      <button class="btn primary" onclick="btnAdminUnlock()">解锁</button>
+    </div>
+  </div>
+</div>
 
 <!-- ================= SIDEBAR (Image 1 Style) ================= -->
 <nav class="sidebar" id="mainSidebar">
@@ -1373,30 +1422,30 @@
       <div class="dash-grid-top">
         <div class="metric-card c-emerald">
           <div class="metric-head"><span class="metric-label">可用账号</span><span class="metric-icon">👥</span></div>
-          <div class="metric-val" id="metricAccounts">3,365</div>
-          <div class="metric-sub" id="metricAccountsSub">3365 / 3365 可用 · 会话隔离</div>
-          <div class="metric-bar"><div class="metric-bar-fill" id="barAccounts" style="width:100%;background:var(--emerald-glow)"></div></div>
+          <div class="metric-val" id="metricAccounts">0</div>
+          <div class="metric-sub" id="metricAccountsSub">0 / 0 可用 · 0 冷却 · 0 失效</div>
+          <div class="metric-bar"><div class="metric-bar-fill" id="barAccounts" style="width:0%;background:var(--emerald-glow)"></div></div>
         </div>
 
         <div class="metric-card c-cyan">
           <div class="metric-head"><span class="metric-label">请求数</span><span class="metric-icon">⚡</span></div>
-          <div class="metric-val" id="metricRequests">74</div>
-          <div class="metric-sub" id="metricRequestsSub">成功率 98.6% · 1 失败</div>
-          <div class="metric-bar"><div class="metric-bar-fill" id="barRequests" style="width:100%;background:var(--cyan)"></div></div>
+          <div class="metric-val" id="metricRequests">0</div>
+          <div class="metric-sub" id="metricRequestsSub">成功率 — · 0 失败</div>
+          <div class="metric-bar"><div class="metric-bar-fill" id="barRequests" style="width:0%;background:var(--cyan)"></div></div>
         </div>
 
         <div class="metric-card c-purple">
           <div class="metric-head"><span class="metric-label">总 Tokens</span><span class="metric-icon">🧮</span></div>
-          <div class="metric-val" id="metricTokens">70,308</div>
-          <div class="metric-sub" id="metricTokensSub">输出 62.2k · 输入 8.1k · 缓存 0%</div>
-          <div class="metric-bar"><div class="metric-bar-fill" id="barTokens" style="width:20%;background:var(--purple)"></div></div>
+          <div class="metric-val" id="metricTokens">0</div>
+          <div class="metric-sub" id="metricTokensSub">输出 0 · 输入 0 · 缓存 0%</div>
+          <div class="metric-bar"><div class="metric-bar-fill" id="barTokens" style="width:0%;background:var(--purple)"></div></div>
         </div>
 
         <div class="metric-card c-amber">
           <div class="metric-head"><span class="metric-label">计费</span><span class="metric-icon">💎</span></div>
-          <div class="metric-val" id="metricCost">$0.39</div>
+          <div class="metric-val" id="metricCost">$0.0000</div>
           <div class="metric-sub" id="metricCostSub">当前 30d 时间段累计节省</div>
-          <div class="metric-bar"><div class="metric-bar-fill" id="barCost" style="width:100%;background:var(--amber)"></div></div>
+          <div class="metric-bar"><div class="metric-bar-fill" id="barCost" style="width:0%;background:var(--amber)"></div></div>
         </div>
       </div>
 
@@ -1404,20 +1453,30 @@
       <div class="grouped-stats-banner">
         <div class="group-stat-item">
           <span class="group-stat-title">⚡ 请求统计</span>
-          <div class="group-stat-row"><span class="group-stat-num" id="grpReqNum">92.67 K</span><span class="group-stat-sub">次</span></div>
+          <div class="group-stat-row"><span class="group-stat-num" id="grpReqNum">0</span><span class="group-stat-sub">次</span></div>
         </div>
         <div class="group-stat-item">
           <span class="group-stat-title">🧰 全部统计</span>
-          <div class="group-stat-row"><span class="group-stat-num" id="grpTokNum">6.68 M</span><span class="group-stat-sub">Tokens</span></div>
+          <div class="group-stat-row"><span class="group-stat-num" id="grpTokNum">0</span><span class="group-stat-sub">Tokens</span></div>
         </div>
         <div class="group-stat-item">
           <span class="group-stat-title">📥 输入统计</span>
-          <div class="group-stat-row"><span class="group-stat-num" id="grpInNum">6.61 M</span><span class="group-stat-sub">Prompt</span></div>
+          <div class="group-stat-row"><span class="group-stat-num" id="grpInNum">0</span><span class="group-stat-sub">Prompt</span></div>
         </div>
         <div class="group-stat-item">
           <span class="group-stat-title">📤 输出统计</span>
-          <div class="group-stat-row"><span class="group-stat-num" id="grpOutNum">60.49 k</span><span class="group-stat-sub">Completion</span></div>
+          <div class="group-stat-row"><span class="group-stat-num" id="grpOutNum">0</span><span class="group-stat-sub">Completion</span></div>
         </div>
+      </div>
+
+      <!-- OPS Live Strip: 并发队列/内存/运行时长/上下文/审计 — 全真实数据 -->
+      <div class="ops-strip">
+        <div class="ops-item"><span class="ops-label">🚦 排队请求</span><span class="ops-val" id="metricOpsQueue">0</span></div>
+        <div class="ops-item"><span class="ops-label">⚙️ 在途并发</span><span class="ops-val" id="metricOpsInflight">0 / 0</span></div>
+        <div class="ops-item"><span class="ops-label">🧠 内存占用</span><span class="ops-val" id="metricOpsMem">0 MB</span></div>
+        <div class="ops-item"><span class="ops-label">⏱ 运行时长</span><span class="ops-val" id="metricOpsUp">0s</span></div>
+        <div class="ops-item"><span class="ops-label">🧵 上下文映射</span><span class="ops-val" id="metricOpsCtx">会话 0</span></div>
+        <div class="ops-item"><span class="ops-label">📋 审计日志</span><span class="ops-val" id="metricOpsAudit">0 条</span></div>
       </div>
 
       <!-- GitHub Activity Heatmap Grid -->
@@ -1463,12 +1522,12 @@
 
         <!-- Mini Metric Pills (Image 2 Style) -->
         <div class="chart-metrics-row">
-          <div class="chart-metric-pill">消耗金额: <b id="pillCost">$0.78</b></div>
-          <div class="chart-metric-pill">峰值: <b id="pillPeak">0.37</b></div>
-          <div class="chart-metric-pill">平均值: <b id="pillAvg">0.07</b></div>
-          <div class="chart-metric-pill">最近值: <b id="pillLatest">0.08</b></div>
-          <div class="chart-metric-pill">时延均值: <b id="pillLatency">24ms</b></div>
-          <div class="chart-metric-pill">令牌用量: <b id="pillTokens">3.06 M</b></div>
+          <div class="chart-metric-pill">消耗金额: <b id="pillCost">$0.0000</b></div>
+          <div class="chart-metric-pill">峰值: <b id="pillPeak">0</b></div>
+          <div class="chart-metric-pill">平均值: <b id="pillAvg">0</b></div>
+          <div class="chart-metric-pill">最近值: <b id="pillLatest">0</b></div>
+          <div class="chart-metric-pill">时延均值: <b id="pillLatency">—</b></div>
+          <div class="chart-metric-pill">令牌用量: <b id="pillTokens">0</b></div>
         </div>
 
         <div class="chart-canvas-container">
@@ -1663,17 +1722,7 @@
 
     <!-- ================= PANE 4: API KEYS ================= -->
     <div data-pane="keys" hidden>
-      <div id="keyAuthLock" class="card-panel" style="max-width:520px;margin:30px auto;text-align:center">
-        <div style="font-size:36px;margin-bottom:10px">🔐</div>
-        <div style="font-size:16px;font-weight:700;margin-bottom:6px">管理员密钥验证</div>
-        <div style="font-size:12.5px;color:var(--text-muted);margin-bottom:18px">如设置了 API_KEY，请输入管理密钥以解锁密钥管理权限。</div>
-        <div style="display:flex;gap:8px">
-          <input type="password" class="input-text" id="adminKeyInput" placeholder="输入 API_KEY 或 管理员 Token">
-          <button class="btn primary" id="btnAdminUnlock">解锁</button>
-        </div>
-      </div>
-
-      <div id="keyMainSection" hidden>
+      <div id="keyMainSection">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
           <div>
             <div style="font-size:15px;font-weight:700;color:var(--text-main)">🔑 API 密钥访问管理</div>
@@ -1969,6 +2018,58 @@ function fmtDT(ts) {
   return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
 }
 
+/* ================= ADMIN AUTH (共享于所有运维面板) ================= */
+let adminToken = sessionStorage.getItem('sak_admin_key') || '';
+
+function getAuthHeaders() {
+  return adminToken ? { authorization: 'Bearer ' + adminToken } : {};
+}
+
+async function apiFetch(url, opts = {}) {
+  const res = await fetch(url, {
+    ...opts,
+    headers: { ...getAuthHeaders(), ...(opts.headers || {}) },
+  });
+  if (res.status === 401 || res.status === 403) {
+    showAdminLock();
+    throw new Error('HTTP ' + res.status + ' (需要管理员密钥)');
+  }
+  return res;
+}
+
+function showAdminLock() {
+  $('globalAdminLock').hidden = false;
+  const el = $('adminKeyInput');
+  if (el) setTimeout(() => el.focus(), 50);
+}
+
+window.btnAdminUnlock = async function() {
+  const v = $('adminKeyInput').value.trim();
+  if (!v) return;
+  try {
+    // 先用管理端点验证凭据,通过才保存
+    const res = await fetch('/api/stats', { headers: { authorization: 'Bearer ' + v } });
+    if (res.status === 401 || res.status === 403) {
+      toast('密钥验证失败,请检查后重试', 'err');
+      return;
+    }
+    adminToken = v;
+    sessionStorage.setItem('sak_admin_key', v);
+    $('globalAdminLock').hidden = true;
+    toast('管理员身份已验证,重新加载面板');
+    refreshAllPanels();
+  } catch {
+    toast('验证请求失败,请刷新页面重试', 'err');
+  }
+};
+
+function refreshAllPanels() {
+  refreshStats();
+  refreshAccounts();
+  refreshKeys();
+  refreshAudit();
+}
+
 /* ================= NAVIGATION ================= */
 document.querySelectorAll('.sidebar-nav button[data-tab]').forEach(btn => {
   btn.onclick = () => {
@@ -2061,7 +2162,7 @@ document.querySelectorAll('#timeRangeGroup button').forEach(btn => {
 
 async function refreshStats() {
   try {
-    const res = await fetch('/api/stats');
+    const res = await apiFetch('/api/stats');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     statsData = await res.json();
     updateDashboardUI(statsData);
@@ -2073,38 +2174,67 @@ async function refreshStats() {
 function updateDashboardUI(st) {
   if (!st) return;
 
-  // 1. Top Metrics
-  const accTotal = st.accounts?.total || 0;
-  const accActive = st.accounts?.active || 0;
-  $('metricAccounts').textContent = accTotal ? `${accActive}` : '1';
-  $('metricAccountsSub').textContent = `${accActive || 1} / ${accTotal || 1} 可用 · 会话隔离`;
+  // 1. Top Metrics — 全部取真实值,无数据时为 0,不再填充演示数据
+  const accTotal = st.accounts?.total ?? 0;
+  const accActive = st.accounts?.active ?? 0;
+  $('metricAccounts').textContent = accActive;
+  $('metricAccountsSub').textContent = `${accActive} / ${accTotal} 可用 · ${st.accounts?.limited || 0} 冷却 · ${st.accounts?.expired || 0} 失效`;
 
   const reqTotal = st.requests?.total || 0;
   const reqOk = st.requests?.ok || 0;
   const reqErr = st.requests?.err || 0;
-  const reqPct = reqTotal ? (100 * reqOk / reqTotal).toFixed(1) : '100';
-  $('metricRequests').textContent = fmtK(reqTotal || 74);
+  const reqPct = reqTotal ? (100 * reqOk / reqTotal).toFixed(1) : '—';
+  $('metricRequests').textContent = fmtK(reqTotal);
   $('metricRequestsSub').textContent = `成功率 ${reqPct}% · ${reqErr} 失败`;
 
   const pTok = st.tokens?.prompt || 0;
   const cTok = st.tokens?.completion || 0;
   const totTok = st.tokens?.total || (pTok + cTok);
   const cacheHit = st.cache?.hitRate || '0%';
-  $('metricTokens').textContent = fmtK(totTok || 70308);
-  $('metricTokensSub').textContent = `输出 ${fmtK(cTok || 62186)} · 输入 ${fmtK(pTok || 8122)} · 缓存 ${cacheHit}`;
+  $('metricTokens').textContent = fmtK(totTok);
+  $('metricTokensSub').textContent = `输出 ${fmtK(cTok)} · 输入 ${fmtK(pTok)} · 缓存 ${cacheHit}`;
 
-  const cost = st.cost?.total || ((((pTok * 0.005) + (cTok * 0.015)) / 1000).toFixed(2));
-  $('metricCost').textContent = `$${cost || '0.39'}`;
+  const cost = st.cost?.total ?? Number((((pTok * 0.005) + (cTok * 0.015)) / 1000).toFixed(4));
+  $('metricCost').textContent = `$${Number(cost).toFixed(4)}`;
 
   // Grouped Banner
-  $('grpReqNum').textContent = reqTotal >= 1000 ? (reqTotal/1000).toFixed(2) + ' K' : (reqTotal || '74');
-  $('grpTokNum').textContent = totTok >= 1000000 ? (totTok/1000000).toFixed(2) + ' M' : (totTok >= 1000 ? (totTok/1000).toFixed(1) + ' k' : (totTok || '70.3 k'));
-  $('grpInNum').textContent = pTok >= 1000000 ? (pTok/1000000).toFixed(2) + ' M' : (pTok >= 1000 ? (pTok/1000).toFixed(1) + ' k' : (pTok || '8.1 k'));
-  $('grpOutNum').textContent = cTok >= 1000000 ? (cTok/1000000).toFixed(2) + ' M' : (cTok >= 1000 ? (cTok/1000).toFixed(1) + ' k' : (cTok || '62.2 k'));
+  $('grpReqNum').textContent = fmtK(reqTotal);
+  $('grpTokNum').textContent = fmtK(totTok);
+  $('grpInNum').textContent = fmtK(pTok);
+  $('grpOutNum').textContent = fmtK(cTok);
 
-  // Mini Pills
-  $('pillCost').textContent = `$${cost || '0.39'}`;
-  $('pillTokens').textContent = fmtK(totTok || 70308);
+  // Mini Pills — 由真实时序数据计算
+  $('pillCost').textContent = `$${Number(cost).toFixed(4)}`;
+  $('pillTokens').textContent = fmtK(totTok);
+  const h24 = st.timeSeries?.h24 || [];
+  if (h24.length) {
+    const reqs = h24.map(b => b.requests || 0);
+    const costs = h24.map(b => b.cost || 0);
+    const toks = h24.map(b => (b.promptTokens || 0) + (b.completionTokens || 0));
+    const peak = Math.max(...reqs);
+    const avg = reqs.length ? (reqs.reduce((a, b) => a + b, 0) / reqs.length).toFixed(1) : '0';
+    const latest = reqs[reqs.length - 1] || 0;
+    $('pillPeak').textContent = peak;
+    $('pillAvg').textContent = avg;
+    $('pillLatest').textContent = latest;
+    $('pillLatency').textContent = st.requests?.avgMs ? Math.round(st.requests.avgMs) + 'ms' : '—';
+    $('pillTokens').textContent = fmtK(toks[toks.length - 1] || totTok);
+  } else {
+    $('pillPeak').textContent = '0';
+    $('pillAvg').textContent = '0';
+    $('pillLatest').textContent = '0';
+    $('pillLatency').textContent = '—';
+  }
+
+  // Ops status strip (真实运维数据)
+  const ops = st.ops || {};
+  const cc = ops.concurrency || {};
+  $('metricOpsQueue').textContent = `${cc.queueLength ?? 0}`;
+  $('metricOpsInflight').textContent = `${cc.inFlight ?? 0} / ${((accActive || 1) * 6)}`;
+  $('metricOpsMem').textContent = `${ops.mem?.rssMB ?? 0} MB`;
+  $('metricOpsUp').textContent = fmtTime(ops.uptimeSec || st.uptimeSec || 0);
+  $('metricOpsCtx').textContent = `会话 ${ops.contextCount ?? 0}`;
+  $('metricOpsAudit').textContent = `${st.auditCount ?? 0} 条`;
 
   // 2. Heatmap Grid
   renderHeatmap(st.timeSeries?.h24 || []);
@@ -2122,7 +2252,7 @@ function updateDashboardUI(st) {
 function renderHeatmap(series) {
   const grid = $('heatmapGrid');
   grid.innerHTML = '';
-  const list = series.length ? series : Array.from({length: 24}, (_, i) => ({ hourStr: `${i}:00`, requests: i === 12 ? 42 : (i > 8 && i < 20 ? Math.floor(Math.random()*15) : 0) }));
+  const list = series.length ? series : Array.from({length: 24}, (_, i) => ({ hourStr: `${String(i).padStart(2,'0')}:00`, requests: 0 }));
   const maxReq = Math.max(1, ...list.map(s => s.requests || 0));
 
   list.forEach(item => {
@@ -2160,10 +2290,10 @@ function renderTrendChart() {
   const rawSeries = statsData?.timeSeries?.h24;
   const series = (rawSeries && rawSeries.length) ? rawSeries : Array.from({length: 24}, (_, i) => ({
     hourStr: `${String(i).padStart(2,'0')}:00`,
-    requests: i === 12 ? 55 : (i === 11 || i === 13 ? 20 : (i > 8 && i < 22 ? Math.floor(Math.random()*10) : 0)),
-    promptTokens: i === 12 ? 8122 : 0,
-    completionTokens: i === 12 ? 62186 : 0,
-    cost: i === 12 ? 0.39 : 0
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    cost: 0
   }));
   
   const dataPoints = series.map(s => {
@@ -2266,7 +2396,7 @@ function renderTrendChart() {
 }
 
 function renderModelRanks(byModel) {
-  let models = Object.entries(byModel).map(([name, data]) => {
+  const models = Object.entries(byModel).map(([name, data]) => {
     const pTok = Math.round((data.charsIn || 0) / 4);
     const cTok = Math.round((data.charsOut || 0) / 4);
     const totalTok = pTok + cTok;
@@ -2274,17 +2404,14 @@ function renderModelRanks(byModel) {
     return { name, requests: data.requests || 0, pTok, cTok, totalTok, cost, errCount: data.errCount || 0 };
   }).sort((a, b) => b.requests - a.requests);
 
-  if (!models.length) {
-    models = [
-      { name: 'sakana-namazu', requests: 74, pTok: 8122, cTok: 62186, totalTok: 70308, cost: 0.39, errCount: 0 },
-      { name: 'sakana-fugu', requests: 12, pTok: 1200, cTok: 8400, totalTok: 9600, cost: 0.05, errCount: 0 },
-      { name: 'sakana-namazu-polite', requests: 5, pTok: 600, cTok: 4200, totalTok: 4800, cost: 0.02, errCount: 0 }
-    ];
-  }
-
   // Podium
   const pod = $('podiumContainer');
   pod.innerHTML = '';
+  if (!models.length) {
+    pod.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:30px;color:var(--text-dim)">暂无请求数据 — 调用 /v1/chat/completions 后这里会出现模型排行</div>';
+    $('modelRankTbody').innerHTML = '<tr><td colspan="9" style="text-align:center;padding:30px;color:var(--text-dim)">暂无数据</td></tr>';
+    return;
+  }
   const top3 = models.slice(0, 3);
   top3.forEach((m, i) => {
     const card = document.createElement('div');
@@ -2327,7 +2454,7 @@ function initChat() {
 
 async function loadModels() {
   try {
-    const res = await fetch('/v1/models');
+    const res = await fetch('/v1/models', { headers: getAuthHeaders() });
     const json = await res.json();
     availableModels = json.data || [];
     const sel = $('chatModelSelect');
@@ -2632,7 +2759,7 @@ async function sendChatMessage() {
   try {
     const resp = await fetch('/v1/chat/completions', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify(reqBody),
     });
 
@@ -2766,31 +2893,32 @@ window.useModelInChat = function(modelId) {
 /* ================= TAB 3: ACCOUNTS ================= */
 async function refreshAccounts() {
   try {
-    const res = await fetch('/api/accounts');
+    const res = await apiFetch('/api/accounts');
     const json = await res.json();
-    const list = json.accounts || [];
+    const list = Array.isArray(json.accounts) ? json.accounts : [];
 
-    $('accStatTotal').textContent = json.total || 0;
-    $('accStatActive').textContent = json.active || 0;
+    $('accStatTotal').textContent = json.total ?? list.length ?? 0;
+    $('accStatActive').textContent = json.active ?? list.filter(a => a.state === 'active').length ?? 0;
     $('accStatLimited').textContent = list.filter(a => a.state === 'rate_limited').length;
     $('accStatExpired').textContent = list.filter(a => a.state === 'expired').length;
 
     const tbody = $('accountRows');
     if (!list.length) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-dim)">暂无独立账号，系统使用全局 session.json 运行</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-dim)">账号池为空 — 点击右上角「触发账号补充」或等待后台自动 Harvest</td></tr>';
       return;
     }
 
     tbody.innerHTML = list.map(a => {
       const statePill = a.state === 'active' ? 'on' : a.state === 'rate_limited' ? 'rate' : 'rev';
       const stateTxt = a.state === 'active' ? '🟢 正常活跃' : a.state === 'rate_limited' ? '⏳ 速率受限' : '🔴 已过期';
-      const inFlightBadge = a.inFlight > 0 ? `<span class="pill rate mono">${a.inFlight} 请求运行中</span>` : '<span class="mono" style="color:var(--text-muted)">0 闲置</span>';
+      const inFlightBadge = (a.inFlight || 0) > 0 ? `<span class="pill rate mono">${a.inFlight} 请求运行中</span>` : '<span class="mono" style="color:var(--text-dim)">0 闲置</span>';
+      const suid = a.uid || (a.cookies?.find(c => c.name === 'uid')?.value) || '';
       return `
         <tr>
-          <td class="mono" style="font-weight:600;color:var(--text-main)">${esc(a.email || (a.uid ? a.uid.slice(0,18) + '...' : '匿名临时账号'))}</td>
+          <td class="mono" style="font-weight:600;color:var(--text-main)">${esc(a.email || (suid ? suid.slice(0,18) + '...' : '匿名临时账号'))}</td>
           <td><span class="pill blue">${a.email ? '注册邮箱' : '免登匿名'}</span></td>
-          <td>${inFlightBadge} <span class="mono" style="font-size:11px;color:var(--text-dim)">(✓ ${a.successCount || 0})</span></td>
-          <td class="mono">${a.cookies?.length || 0} 个</td>
+          <td>${inFlightBadge} <span class="mono" style="font-size:11px;color:var(--text-dim)">(✓ ${a.successCount || 0} · ✗ ${a.errorCount || 0})</span></td>
+          <td class="mono">${(a.cookies || []).length} 个</td>
           <td class="mono">${a.savedAt ? fmtTime(Math.floor((Date.now() - a.savedAt)/1000)) : '—'}</td>
           <td><span class="pill ${statePill}">${stateTxt}</span></td>
           <td class="mono" style="font-size:11.5px">${fmtDT(a.savedAt)}</td>
@@ -2804,30 +2932,17 @@ async function refreshAccounts() {
 $('btnRefreshAccounts').onclick = () => { refreshAccounts(); toast('已刷新账号池'); };
 $('btnTriggerHarvest').onclick = async () => {
   try {
-    const res = await fetch('/api/accounts/refresh', { method: 'POST' });
+    const res = await apiFetch('/api/accounts/refresh', { method: 'POST' });
     if (res.ok) toast('已触发后台账号 Harvest 任务');
     else toast('触发失败', 'err');
   } catch { toast('请求失败', 'err'); }
 };
 
 /* ================= TAB 4: API KEYS ================= */
-let adminToken = sessionStorage.getItem('sak_admin_key') || '';
-
 async function refreshKeys() {
   try {
-    const res = await fetch('/api/keys', {
-      headers: adminToken ? { 'authorization': 'Bearer ' + adminToken } : {}
-    });
-
-    if (res.status === 403 || res.status === 401) {
-      $('keyAuthLock').hidden = false;
-      $('keyMainSection').hidden = true;
-      return;
-    }
-
-    $('keyAuthLock').hidden = true;
+    const res = await apiFetch('/api/keys');
     $('keyMainSection').hidden = false;
-
     const data = await res.json();
     $('keyAuthStatusHint').textContent = data.open ? '当前为开放模式 (无需 Key 直通调用)' : `已启用 Key 认证 (${data.keys?.length || 0} 个)`;
 
@@ -2855,15 +2970,6 @@ async function refreshKeys() {
   }
 }
 
-$('btnAdminUnlock').onclick = async () => {
-  const v = $('adminKeyInput').value.trim();
-  if (!v) return;
-  adminToken = v;
-  sessionStorage.setItem('sak_admin_key', v);
-  toast('已设置管理凭据');
-  refreshKeys();
-};
-
 $('btnOpenCreateKey').onclick = () => {
   $('modalKeyName').value = '';
   $('createKeyModal').hidden = false;
@@ -2874,12 +2980,9 @@ $('btnCloseKeyModal').onclick = () => $('createKeyModal').hidden = true;
 $('btnSubmitCreateKey').onclick = async () => {
   const name = $('modalKeyName').value.trim() || 'Key-' + Date.now().toString(36);
   try {
-    const res = await fetch('/api/keys', {
+    const res = await apiFetch('/api/keys', {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(adminToken ? { 'authorization': 'Bearer ' + adminToken } : {})
-      },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name }),
     });
     const json = await res.json();
@@ -2902,10 +3005,7 @@ $('btnCopyNewKey').onclick = () => {
 window.revokeKey = async function(id) {
   if (!confirm('确定要撤销此 API Key 吗？撤销后将立即失效。')) return;
   try {
-    const res = await fetch(`/api/keys/${id}/revoke`, {
-      method: 'POST',
-      headers: adminToken ? { 'authorization': 'Bearer ' + adminToken } : {}
-    });
+    const res = await apiFetch(`/api/keys/${id}/revoke`, { method: 'POST' });
     if (res.ok) {
       toast('密钥已撤销');
       refreshKeys();
@@ -2920,7 +3020,7 @@ window.revokeKey = async function(id) {
 /* ================= TAB 5: AUDIT LOGS ================= */
 async function refreshAudit() {
   try {
-    const res = await fetch('/api/audit');
+    const res = await apiFetch('/api/audit');
     const json = await res.json();
     auditLogs = json.entries || [];
     renderAuditRows();
@@ -2963,14 +3063,21 @@ function renderAuditRows() {
 
 $('auditSearchInput').oninput = renderAuditRows;
 $('btnRefreshAudit').onclick = () => { refreshAudit(); toast('已刷新审计日志'); };
-$('btnExportAuditCsv').onclick = () => window.open('/api/export-audit.csv', '_blank');
+$('btnExportAuditCsv').onclick = async () => {
+  try {
+    const res = await apiFetch('/api/export-audit.csv');
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `sakana-audit-${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch { toast('导出失败(需要管理员密钥)', 'err'); }
+};
 $('btnClearAuditLogs').onclick = async () => {
   if (!confirm('确定清空所有请求日志吗？')) return;
   try {
-    const res = await fetch('/api/audit/clear', {
-      method: 'POST',
-      headers: adminToken ? { 'authorization': 'Bearer ' + adminToken } : {}
-    });
+    const res = await apiFetch('/api/audit/clear', { method: 'POST' });
     if (res.ok) {
       toast('审计日志已清空');
       refreshAudit();
@@ -3003,10 +3110,7 @@ $('btnThemeLight').onclick = () => {
 
 $('btnClearCache').onclick = async () => {
   try {
-    const res = await fetch('/api/cache/clear', {
-      method: 'POST',
-      headers: adminToken ? { 'authorization': 'Bearer ' + adminToken } : {}
-    });
+    const res = await apiFetch('/api/cache/clear', { method: 'POST' });
     if (res.ok) {
       toast('缓存已全部清理');
       refreshStats();

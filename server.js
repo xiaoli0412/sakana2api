@@ -827,8 +827,25 @@ const server = http.createServer(async (req, res) => {
       try { session = JSON.parse(fs.readFileSync(path.join(__dirname, 'session.json'), 'utf8')); } catch {}
       const s = stats.snapshot(session);
       s.cache = cache.stats();
-      s.accounts = { total: accountPool.count(), active: accountPool.activeCount(), max: 10 };
+      const mem = process.memoryUsage();
+      const poolList = accountPool.accounts;
+      s.accounts = {
+        total: poolList.length,
+        active: accountPool.activeCount(),
+        limited: poolList.filter(a => a.state === 'rate_limited').length,
+        expired: poolList.filter(a => a.state === 'expired').length,
+        max: 10,
+        inFlight: poolList.reduce((n, a) => n + (a.inFlight || 0), 0),
+      };
       s.auditCount = auditLog.length;
+      s.ops = {
+        concurrency: concurrencyManager.stats,
+        contextCount: contextMap.size,
+        uptimeSec: Math.floor((Date.now() - stats.startedAt) / 1000),
+        mem: { rssMB: Math.round(mem.rss / 1048576), heapMB: Math.round(mem.heapUsed / 1048576), heapMaxMB: Math.round(mem.heapTotal / 1048576) },
+        node: process.version,
+        authMode: (API_KEY || keyStore.keys.some(k => !k.revoked)) ? 'keyed' : 'open',
+      };
       return sendJson(res, 200, s);
     }
     if (p === '/api/keys') {
@@ -886,9 +903,27 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
-    // Accounts endpoint
+    // Accounts endpoint — ADMIN-only. Returns SAFE fields only: session cookies
+// and firebase tokens must never leave the server (any API-key holder could
+// otherwise steal and hijack the whole pool).
     if (req.method === 'GET' && p === '/api/accounts') {
-      return sendJson(res, 200, { accounts: accountPool.accounts, total: accountPool.count(), active: accountPool.activeCount() });
+      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
+      accountPool._checkCooldowns();
+      const safe = accountPool.accounts.map(a => ({
+        id: a.id,
+        email: a.email || '',
+        uid: a.uid || '',
+        display: a.display || '',
+        state: a.state || 'active',
+        inFlight: a.inFlight || 0,
+        successCount: a.successCount || 0,
+        errorCount: a.errorCount || 0,
+        refreshes: a.refreshes || 0,
+        savedAt: a.savedAt || 0,
+        cookieCount: (a.cookies || []).length,
+        rateLimitedAt: a.rateLimitedAt || 0,
+      }));
+      return sendJson(res, 200, { accounts: safe, total: accountPool.count(), active: accountPool.activeCount() });
     }
 
     if (req.method === 'POST' && p === '/api/accounts/refresh') {
