@@ -1641,8 +1641,8 @@
                 <div class="chat-controls-left">
                   <button class="toggle-btn" id="btnAttachFile" title="添加附件或图片">➕ 附件</button>
                   <select class="chat-select mono" id="chatModelSelect"></select>
-                  <button class="toggle-btn active" id="btnToggleThink" title="深度思考链">🧠 思考</button>
-                  <button class="toggle-btn active" id="btnToggleSearch" title="联网搜索">🌐 联网</button>
+                  <button class="toggle-btn" id="btnToggleThink" title="深度思考链(与联网互斥)">🧠 思考</button>
+                  <button class="toggle-btn active" id="btnToggleSearch" title="联网搜索(与思考互斥)">🌐 联网</button>
                 </div>
                 <div style="display:flex;gap:6px">
                   <button class="btn primary sm" id="btnSendChat" style="padding:6px 16px;font-weight:700">↑ 发送</button>
@@ -2578,8 +2578,15 @@ document.querySelectorAll('.suggestion-chip').forEach(chip => {
   };
 });
 
-$('btnToggleThink').onclick = () => $('btnToggleThink').classList.toggle('active');
-$('btnToggleSearch').onclick = () => $('btnToggleSearch').classList.toggle('active');
+// 输入模式互斥(与上游真实 UI 一致,INPUT-MODE-001):搜索开时思考必须关
+$('btnToggleThink').onclick = () => {
+  const thinkOn = $('btnToggleThink').classList.toggle('active');
+  if (thinkOn) $('btnToggleSearch').classList.remove('active');
+};
+$('btnToggleSearch').onclick = () => {
+  const searchOn = $('btnToggleSearch').classList.toggle('active');
+  if (searchOn) $('btnToggleThink').classList.remove('active');
+};
 
 // Attachment handling
 $('btnAttachFile').onclick = () => $('fileUploadInput').click();

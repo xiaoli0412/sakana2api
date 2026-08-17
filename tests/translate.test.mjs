@@ -225,6 +225,27 @@ console.log('== 13. Web search explicit parameter controls ==');
   check('web_search: true enables search', enabled.webSearchEnabled === true);
 }
 
+console.log('== 13b. INPUT-MODE-001 guard: search+thinking are mutually exclusive (verified by real-browser capture 2026-08-17) ==');
+{
+  // The web UI never sends both: when web search is on it sends enableThinking:false.
+  // The upstream rejects both-true with INPUT-MODE-001. Search must win.
+  const both = openaiRequestToSakana({ model: 'sakana-namazu', web_search: true, enable_thinking: true, messages: [{ role: 'user', content: 'test' }] });
+  check('both on -> search true', both.webSearchEnabled === true);
+  check('both on -> thinking forced false', both.enableThinking === false);
+
+  const bothViaModel = openaiRequestToSakana({ model: 'sakana-namazu-search', enable_thinking: true, messages: [{ role: 'user', content: 'test' }] });
+  check('model search suffix + thinking -> thinking forced false', bothViaModel.webSearchEnabled === true && bothViaModel.enableThinking === false);
+
+  const thinkOnly = openaiRequestToSakana({ model: 'sakana-namazu', web_search: false, enable_thinking: true, messages: [{ role: 'user', content: 'test' }] });
+  check('thinking alone stays on', thinkOnly.enableThinking === true && thinkOnly.webSearchEnabled === false);
+
+  const searchOnly = openaiRequestToSakana({ model: 'sakana-namazu', web_search: true, enable_thinking: false, messages: [{ role: 'user', content: 'test' }] });
+  check('search alone stays on', searchOnly.webSearchEnabled === true && searchOnly.enableThinking === false);
+
+  const thinkModelSearchOff = openaiRequestToSakana({ model: 'sakana-namazu-think', web_search: false, messages: [{ role: 'user', content: 'test' }] });
+  check('think model + explicit search off -> thinking on', thinkModelSearchOff.enableThinking === true && thinkModelSearchOff.webSearchEnabled === false);
+}
+
 console.log('== 14. Least-InFlight load balancing & account pool ==');
 {
   const pool = new AccountPool();
