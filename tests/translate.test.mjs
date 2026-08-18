@@ -1,6 +1,6 @@
 // Offline test: feed a realistic Sakana NDJSON stream (based on the protocol)
 // into the translator and verify the OpenAI SSE chunks it produces.
-import { openaiRequestToSakana, NdjsonTranslator, sniffMimeType } from '../lib/translate.js';
+import { openaiRequestToSakana, NdjsonTranslator, sniffMimeType, parseModel, MODELS } from '../lib/translate.js';
 import { AccountPool } from '../lib/account-pool.js';
 import { ConcurrencyManager } from '../lib/concurrency.js';
 
@@ -19,25 +19,31 @@ console.log('== 1. OpenAI request -> Sakana bootstrap ==');
   check('toneMode=polite->jp-vibes', r.toneMode === 'jp-vibes', r.toneMode);
   check('prompt="你好"', r.prompt === '你好', r.prompt);
   check('model=sakana-namazu', r.sakanaModel === 'sakana-namazu', r.sakanaModel);
-  check('default search=true', r.webSearchEnabled === true);
+  check('default search=true (raw parse)', parseModel('sakana-namazu').webSearchEnabled === true);
+  check('guard: think innate degrades search in final request', r.webSearchEnabled === false && r.enableThinking === true);
 }
 
 console.log('== 1b. hyphen model matrix parsing ==');
 {
   const cases = [
-    ['sakana-namazu', { m: 'sakana-namazu', tone: 'default', search: true }],
-    ['sakana-namazu-polite', { m: 'sakana-namazu', tone: 'jp-vibes', search: true }],
-    ['sakana-namazu-search', { m: 'sakana-namazu', tone: 'default', search: true }],
-    ['sakana-namazu-osaka', { m: 'sakana-namazu', tone: 'osaka', search: true }],
-    ['sakana-fugu', { m: 'fugu', tone: 'default', search: true }],
-    ['sakana-fugu-polite-search', { m: 'fugu', tone: 'jp-vibes', search: true }],
-    ['sakana-fugu-osaka', { m: 'fugu', tone: 'osaka', search: true }],
+    ['sakana-namazu', { m: 'sakana-namazu', tone: 'default', search: true, think: true, rp: false }],
+    ['sakana-namazu-polite', { m: 'sakana-namazu', tone: 'jp-vibes', search: true, think: true, rp: false }],
+    ['sakana-namazu-search', { m: 'sakana-namazu', tone: 'default', search: true, think: true, rp: false }],
+    ['sakana-namazu-osaka', { m: 'sakana-namazu', tone: 'osaka', search: true, think: true, rp: false }],
+    ['sakana-namazu-nosearch', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-fugu', { m: 'fugu', tone: 'default', search: true, think: true, rp: false }],
+    ['sakana-fugu-polite-search', { m: 'fugu', tone: 'jp-vibes', search: true, think: true, rp: false }],
+    ['sakana-fugu-osaka', { m: 'fugu', tone: 'osaka', search: true, think: true, rp: false }],
+    ['sakana-namazu-rp', { m: 'sakana-namazu', tone: 'default', search: true, think: true, rp: true }],
   ];
   for (const [model, want] of cases) {
-    const r = openaiRequestToSakana({ model, messages: [] });
-    const got = { m: r.sakanaModel, tone: r.toneMode, search: r.webSearchEnabled };
+    const r = parseModel(model);
+    const got = { m: r.sakanaModel, tone: r.toneMode, search: r.webSearchEnabled, think: r.enableThinking, rp: r.isRP };
     check(`parse ${model}`, JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got));
   }
+  const rp = MODELS.find(m => m.id === 'sakana-namazu-rp');
+  check('RP model listed in /v1/models', !!rp && rp.rp === true && rp.apiModel === 'sakana-namazu', rp && rp.id);
+  check('total models = 16', MODELS.length === 16, String(MODELS.length));
 }
 
 console.log('== 2. multimodal image data url -> files ==');
@@ -221,20 +227,22 @@ console.log('== 13. Web search explicit parameter controls ==');
   const disabled = openaiRequestToSakana({ model: 'sakana-namazu', web_search: false, messages: [{ role: 'user', content: 'test' }] });
   check('web_search: false disables search', disabled.webSearchEnabled === false);
 
-  const enabled = openaiRequestToSakana({ model: 'sakana-namazu', web_search: true, messages: [{ role: 'user', content: 'test' }] });
-  check('web_search: true enables search', enabled.webSearchEnabled === true);
+  // Thinking is innate, so search only survives when the client explicitly
+  // turns thinking off (same as the real web UI: it never sends both).
+  const enabled = openaiRequestToSakana({ model: 'sakana-namazu', web_search: true, enable_thinking: false, messages: [{ role: 'user', content: 'test' }] });
+  check('web_search: true + enable_thinking:false enables search', enabled.webSearchEnabled === true && enabled.enableThinking === false);
 }
 
-console.log('== 13b. INPUT-MODE-001 guard: search+thinking are mutually exclusive (verified by real-browser capture 2026-08-17) ==');
+console.log('== 13b. INPUT-MODE-001 guard: thinking wins, search degrades (verified by real-browser capture 2026-08-17) ==');
 {
-  // The web UI never sends both: when web search is on it sends enableThinking:false.
-  // The upstream rejects both-true with INPUT-MODE-001. Search must win.
+  // The upstream rejects both-true with INPUT-MODE-001. Thinking is innate,
+  // so when both are requested the search flag is silently degraded.
   const both = openaiRequestToSakana({ model: 'sakana-namazu', web_search: true, enable_thinking: true, messages: [{ role: 'user', content: 'test' }] });
-  check('both on -> search true', both.webSearchEnabled === true);
-  check('both on -> thinking forced false', both.enableThinking === false);
+  check('both on -> thinking stays on', both.enableThinking === true);
+  check('both on -> search degraded off', both.webSearchEnabled === false);
 
   const bothViaModel = openaiRequestToSakana({ model: 'sakana-namazu-search', enable_thinking: true, messages: [{ role: 'user', content: 'test' }] });
-  check('model search suffix + thinking -> thinking forced false', bothViaModel.webSearchEnabled === true && bothViaModel.enableThinking === false);
+  check('model search suffix + thinking -> search degraded off', bothViaModel.webSearchEnabled === false && bothViaModel.enableThinking === true);
 
   const thinkOnly = openaiRequestToSakana({ model: 'sakana-namazu', web_search: false, enable_thinking: true, messages: [{ role: 'user', content: 'test' }] });
   check('thinking alone stays on', thinkOnly.enableThinking === true && thinkOnly.webSearchEnabled === false);
@@ -244,6 +252,25 @@ console.log('== 13b. INPUT-MODE-001 guard: search+thinking are mutually exclusiv
 
   const thinkModelSearchOff = openaiRequestToSakana({ model: 'sakana-namazu-think', web_search: false, messages: [{ role: 'user', content: 'test' }] });
   check('think model + explicit search off -> thinking on', thinkModelSearchOff.enableThinking === true && thinkModelSearchOff.webSearchEnabled === false);
+}
+
+console.log('== 13c. system prompt and RP injection ==');
+{
+  const r = openaiRequestToSakana({ model: 'sakana-namazu', messages: [
+    { role: 'system', content: 'SYS-身份' },
+    { role: 'user', content: '你好' },
+  ] });
+  check('system prompt leads the prompt', r.prompt.startsWith('SYS-身份'), r.prompt.slice(0, 40));
+
+  const multi = openaiRequestToSakana({ model: 'sakana-namazu', messages: [
+    { role: 'system', content: 'A' },
+    { role: 'system', content: 'B' },
+    { role: 'user', content: 'C' },
+  ] });
+  check('multiple system prompts keep order', multi.prompt.startsWith('A\n\nB\n\nC'), multi.prompt.slice(0, 40));
+
+  const rp = openaiRequestToSakana({ model: 'sakana-namazu-rp', messages: [{ role: 'user', content: '嗨' }] });
+  check('rp model flagged', rp.isRP === true);
 }
 
 console.log('== 14. Least-InFlight load balancing & account pool ==');

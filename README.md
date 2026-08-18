@@ -53,6 +53,8 @@
 | **MCP / Coding** | 自动支持 | ✅ 协议层完整,服务端自主执行 |
 | **多轮续聊** | `conversation_id` 参数 | ✅ |
 | **文件上传** | `content: [{type:"file",...}]` | ✅ |
+| **🎭 角色卡** | 酒馆/SillyTavern PNG 角色卡 | ✅ 上传/激活/注入 + RP 专属模型 |
+| **RP 角色扮演** | `model: "sakana-namazu-rp"` | ✅ 沉浸式提示词 + 轻破线破甲 |
 | **自动过盾** | 无需任何操作 | ✅ 真实 Chromium 自动过 Cloudflare 5秒盾 |
 | **自动登录** | 无需任何操作 | ✅ 临时邮箱 + 魔法链接全自动注册登录 |
 | **Web 管理面板** | 浏览器打开 `http://<host>:8787/` | ✅ 聊天 / 监控 / 会话 / 密钥 |
@@ -152,7 +154,7 @@ for chunk in resp:
 
 ### `GET /v1/models`
 
-12 个模型(2 模型 × 3 风格 × 2 后缀,连字符格式):
+16 个模型(12 个标准模型:2 模型 × 3 风格 × 2 后缀 + 4 个 RP 角色扮演模型):
 
 | 模型 ID | 说明 |
 |---------|------|
@@ -163,9 +165,15 @@ for chunk in resp:
 | `sakana-namazu-osaka` | Namazu · Osaka 🐙 · 默认 |
 | `sakana-namazu-osaka-search` | Namazu · Osaka 🐙 · 显式搜索 |
 | `sakana-fugu` … | Fugu · 同上 6 种组合 |
+| `sakana-namazu-rp` | 🎭 RP 角色扮演(默认风格,含轻破线破甲授权) |
+| `sakana-fugu-rp` | 🎭 RP 角色扮演(Fugu 上游) |
+| `sakana-namazu-polite-rp` | 🎭 RP 角色扮演(礼貌风格) |
+| `sakana-namazu-osaka-rp` | 🎭 RP 角色扮演(大阪风格) |
 
 > 思考链是模型**天生自带**的(任何对话都会产生 reasoning_content),无需单独开关;
 > 后缀仅控制是否显式启用 Web 搜索。旧冒号格式(`sakana-namazu:polite`)仍兼容。
+> `-rp` 后缀模型自动注入沉浸式角色扮演系统提示词(台词/动作/内心独白格式 +
+> 轻破线破甲授权),与角色卡叠加使用:角色卡定人设,RP 提示词定扮演规则。
 
 ### `POST /v1/chat/completions`
 
@@ -218,6 +226,22 @@ Anthropic Messages 格式:`{ model, system, messages, max_tokens, stream }`
 - `{ type: "file", name, mime, file_url: "data:…" }` — 文本类文件自动提取进提示词(py/js/md/txt/csv/json 等 50+ 格式,上限 50KB),图片/音频走多模态
 - 远程 URL(`https://…`)自动下载
 
+### 🎭 角色卡(酒馆/SillyTavern 格式)
+
+支持 TavernAI v1 / char_card_v2 / v3 角色卡 PNG(解析 `tEXt`/`zTXt`/`iTXt` 块及 IEND 尾部追加格式):
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/characters/upload` | 上传角色卡 PNG(raw body),返回 `{id, name, description}` |
+| `GET /api/characters` | 列表 + 当前激活的角色 `{characters:[…], active:…}` |
+| `POST /api/characters/:id/activate` | 激活角色卡(全局注入) |
+| `POST /api/characters/deactivate` | 取消激活 |
+| `GET /api/characters/:id/avatar` | 角色头像 PNG |
+
+请求侧可通过 `character_id`(body)或 `x-character-id`(header)指定角色卡;未指定时使用全局激活的角色。
+注入内容:description + personality + scenario + system_prompt 合并进 system 消息,`first_mes` 作为开场白,
+`character_book` 规则暂以完整条目注入。管理端点需管理员密钥(与 `/api/*` 一致)。
+
 ---
 
 ## 🧪 项目结构
@@ -225,8 +249,10 @@ Anthropic Messages 格式:`{ model, system, messages, max_tokens, stream }`
 ```
 sakana-2api/
 ├── server.js           # 🚀 HTTP 服务入口 (OpenAI 兼容路由 + 管理 API)
+├── character_cards/    # 🎭 上传的角色卡 (json + 头像 png, 运行时生成)
 ├── lib/
 │   ├── translate.js    # 🔄 协议翻译层 (OpenAI ↔ Sakana NDJSON)
+│   ├── character-card.js # 🎭 角色卡 PNG 解析器 (tEXt/zTXt/iTXt + v1/v2/v3)
 │   ├── upstream.js     # 📡 Sakana 内部 API 客户端
 │   ├── session.js      # 🔑 会话文件读写
 │   ├── auto-session.js # 🤖 全自动会话:过CF + 临时邮箱登录 + 收割 + 刷新

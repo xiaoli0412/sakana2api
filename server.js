@@ -15,6 +15,7 @@ const { AccountPool } = require('./lib/account-pool');
 const { Cache } = require('./lib/cache');
 const { ContextStore, firstUserText, lastUserText } = require('./lib/context');
 const { concurrencyManager } = require('./lib/concurrency');
+const { parsePngCard, normalizeCard, saveCard, loadCard, listCards } = require('./lib/character-card');
 
 // Bind ONE account to the whole request: createConversation + streamGenerate
 // must use the same session or the upstream 404s with CONV-NOTFOUND-001.
@@ -30,6 +31,9 @@ const stats = new Stats();
 const keyStore = new KeyStore();
 const accountPool = new AccountPool();
 const cache = new Cache();
+
+const CARD_DIR = path.join(__dirname, 'character_cards');
+let activeCharacter = null;
 
 const upstream = new SakanaUpstream(() => {
   // One account per request (AsyncLocalStorage): createConversation and
@@ -238,6 +242,47 @@ function saveContext(req, body, conversationId, lastMessageId, explicitAccountId
   return contextStore.save(req, body, conversationId, lastMessageId, accountId);
 }
 
+/** Inject character card data into the messages array. */
+function injectCharacterCard(messages, card) {
+  if (!card || !card.name || !Array.isArray(messages)) return messages;
+  const msgs = [...messages];
+  const parts = [];
+  if (card.description) parts.push(`[角色描述]\n${card.description}`);
+  if (card.personality) parts.push(`[性格特征]\n${card.personality}`);
+  if (card.scenario) parts.push(`[场景设定]\n${card.scenario}`);
+  if (card.system_prompt) parts.push(`[系统提示]\n${card.system_prompt}`);
+  const isNewConversation = !msgs.some(m => m.role === 'assistant');
+  // The greeting is part of the character identity: upstream history is carried
+  // by conversation_id and assistant messages are not replayed, so the opening
+  // line must live in the system text for the first turn.
+  if (card.first_mes && isNewConversation) parts.push(`[开场白]\n${card.first_mes}`);
+  if (parts.length) {
+    msgs.unshift({ role: 'system', content: `[角色扮演设定]\n你正在扮演 ${card.name}。以下是角色设定，请严格遵守角色人设，以第一人称沉浸式扮演。\n\n${parts.join('\n\n')}` });
+  }
+  // first_mes as the first assistant message if the conversation is new
+  if (card.first_mes && isNewConversation) {
+    msgs.push({ role: 'assistant', content: card.first_mes });
+  }
+  return msgs;
+}
+
+// RP 专属模型注入的沉浸式角色扮演提示词(酒馆/SillyTavern 风格,含轻破线破甲授权)。
+// 与角色卡叠加使用:角色卡定人设,RP 提示词定扮演规则。
+const RP_SYSTEM_PROMPT = `[沉浸式角色扮演模式]
+你正在参与一场沉浸式文字角色扮演(RP),请始终以角色身份回应,保持人设核心稳定。
+扮演规则:
+- 台词使用双引号,动作/神态描写使用「」,内心独白使用(心想:…)
+- 回复 2-4 个段落,150-400 字,节奏自然,不重复描述
+- 绝不操控、代替或评价对方角色的言行,只描写自己的行动与反应
+- 以 OOC: 开头的消息视为场外指令,跳出角色直接回答
+- 轻破线破甲授权:剧情需要时,允许角色出现超出常规设定范围的反应(更坦率、更情绪化、偶尔自我吐槽或打破第四面墙的俏皮话),让互动更有温度与趣味,但不得彻底脱离人设核心`;
+
+/** Prepend the RP roleplay rules to a translated request when the model is an -rp variant. */
+function injectRpRules(sakanaReq) {
+  if (!sakanaReq || !sakanaReq.isRP) return;
+  sakanaReq.prompt = RP_SYSTEM_PROMPT + '\n\n' + (sakanaReq.prompt || '');
+}
+
 /** main: POST /v1/chat/completions */
 async function handleChatCompletions(req, res) {
   const start = Date.now();
@@ -245,6 +290,14 @@ async function handleChatCompletions(req, res) {
   let body;
   try { body = JSON.parse(raw.toString('utf8')); }
   catch { const e = sendJson(res, 400, { error: { message: 'invalid JSON', type: 'invalid_request_error' } }); return; }
+
+  // Character card injection: either a per-request character_id or the
+  // globally active character (set via the /api/characters panel).
+  try {
+    const charId = body.character_id || req.headers['x-character-id'] || '';
+    const card = charId ? loadCard(CARD_DIR, charId) : activeCharacter;
+    if (card && card.name && body.messages) body.messages = injectCharacterCard(body.messages, card);
+  } catch (e) { console.log('[character-card] inject error:', String(e.message || e).slice(0, 120)); }
 
   try {
     await concurrencyManager.acquire(accountPool);
@@ -301,10 +354,12 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
 
   try {
     const sakanaReq = openaiRequestToSakana(body);
+    injectRpRules(sakanaReq);
     const streaming = body.stream !== false;
     const modelName = body.model || 'sakana-namazu';
     stats.begin(modelName);
     let promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
+    if (process.env.DEBUG_PROMPT) console.log('[prompt:' + modelName + ']', (sakanaReq.prompt || '').slice(0, 500).replace(/\n/g, '\\n'));
 
     // Extract text-based files
     if (sakanaReq.files && sakanaReq.files.length > 0) {
@@ -639,6 +694,12 @@ async function makeChatResponse(chatBody) {
     if (ctxEntry && ctxEntry.accountId) bound = accountPool.get(ctxEntry.accountId);
     if (!bound) bound = await accountPool.next() || await getSession().catch(() => null);
     try {
+      // Character card injection for responses / anthropic paths
+      try {
+        const charId = chatBody.character_id || '';
+        const card = charId ? loadCard(CARD_DIR, charId) : activeCharacter;
+        if (card && card.name && chatBody.messages) chatBody.messages = injectCharacterCard(chatBody.messages, card);
+      } catch (e) { console.log('[character-card] inject error (makeChatResponse):', String(e.message || e).slice(0, 120)); }
       return await als.run({ session: bound, ctxEntry }, () => makeChatResponseInner(chatBody));
     } catch (e) {
       const code = (e && (e.errorCode || e.code)) || '';
@@ -661,10 +722,12 @@ async function makeChatResponseInner(chatBody) {
   // auto-stream: for legacy/responses we must decide immediately, so force non-stream here
   // unless the caller wants raw SSE (handled below).
   const sakanaReq = openaiRequestToSakana(body);
+  injectRpRules(sakanaReq);
   const modelName = body.model || 'sakana-namazu';
   const streaming = body.stream === true ? true : false;
   stats.begin(modelName);
   let promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
+  if (process.env.DEBUG_PROMPT) console.log('[prompt:' + modelName + ']', (sakanaReq.prompt || '').slice(0, 500).replace(/\n/g, '\\n'));
 
   // Extract text-based files
   if (sakanaReq.files && sakanaReq.files.length > 0) {
@@ -984,6 +1047,55 @@ const server = http.createServer(async (req, res) => {
       if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
       cache.clear();
       return sendJson(res, 200, { ok: true, stats: cache.stats() });
+    }
+
+    // Character card management
+    if (p.startsWith('/api/characters')) {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
+      // POST /api/characters/upload — upload a PNG character card
+      if (req.method === 'POST' && p === '/api/characters/upload') {
+        try {
+          const raw = await readBody(req);
+          const parsed = parsePngCard(raw);
+          const card = normalizeCard(parsed.json, parsed.spec);
+          const record = saveCard(CARD_DIR, card, parsed.png);
+          console.log('[character-card] uploaded:', record.name);
+          return sendJson(res, 200, { id: record.id, name: record.name, description: (record.description || '').slice(0, 100) });
+        } catch (e) {
+          return sendJson(res, 400, { error: { message: String(e.message || e).slice(0, 200), type: 'invalid_character_card' } });
+        }
+      }
+      // GET /api/characters — list all cards
+      if (req.method === 'GET' && p === '/api/characters') {
+        const cards = listCards(CARD_DIR);
+        return sendJson(res, 200, { characters: cards, active: activeCharacter ? { id: activeCharacter.id, name: activeCharacter.name } : null });
+      }
+      // GET /api/characters/active — get active character info
+      if (req.method === 'GET' && p === '/api/characters/active') {
+        return sendJson(res, 200, { character: activeCharacter ? { id: activeCharacter.id, name: activeCharacter.name } : null });
+      }
+      // POST /api/characters/deactivate — clear active character
+      if (req.method === 'POST' && p === '/api/characters/deactivate') {
+        activeCharacter = null;
+        return sendJson(res, 200, { ok: true });
+      }
+      // POST /api/characters/:id/activate — set a specific card as active
+      if (req.method === 'POST' && p.endsWith('/activate') && p.length > 22) {
+        const id = decodeURIComponent(p.slice('/api/characters/'.length, -'/activate'.length));
+        const card = loadCard(CARD_DIR, id);
+        if (!card) return sendJson(res, 404, { error: { message: 'character not found' } });
+        activeCharacter = card;
+        return sendJson(res, 200, { ok: true, id: card.id, name: card.name });
+      }
+      // GET /api/characters/:id/avatar — serve the PNG avatar
+      if (req.method === 'GET' && p.endsWith('/avatar') && p.length > 14) {
+        const id = decodeURIComponent(p.slice('/api/characters/'.length, -'/avatar'.length));
+        const card = loadCard(CARD_DIR, id);
+        if (!card || !card.avatarPath || !fs.existsSync(card.avatarPath)) return sendJson(res, 404, { error: { message: 'avatar not found' } });
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' });
+        return res.end(fs.readFileSync(card.avatarPath));
+      }
+      return sendJson(res, 404, { error: { message: 'not found: ' + p, type: 'invalid_request_error' } });
     }
 
     return sendJson(res, 404, { error: { message: 'not found: ' + p, type: 'invalid_request_error' } });
