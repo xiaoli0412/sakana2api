@@ -16,6 +16,11 @@ const { Cache } = require('./lib/cache');
 const { ContextStore, firstUserText, lastUserText } = require('./lib/context');
 const { concurrencyManager } = require('./lib/concurrency');
 const { parsePngCard, normalizeCard, saveCard, loadCard, listCards } = require('./lib/character-card');
+const { buildRpSystem, resolveRpPreset, resolveRpNsfw } = require('./lib/rp-preset');
+const {
+  isGeminiBody, geminiRequestToChat, parseGeminiRoute, geminiModelList,
+  geminiErrorBody, createGeminiResponseAdapter,
+} = require('./lib/gemini');
 
 // Bind ONE account to the whole request: createConversation + streamGenerate
 // must use the same session or the upstream 404s with CONV-NOTFOUND-001.
@@ -97,12 +102,19 @@ function sseHeaders(res) {
   });
 }
 
-// Auth: open when nothing enforced
+// Auth: open when nothing enforced.
+// 多格式请求头适配:Authorization: Bearer / x-goog-api-key(Gemini 客户端) /
+// x-api-key / api-key 均可携带密钥。
+function extractToken(req) {
+  const h = req.headers.authorization || '';
+  if (h.startsWith('Bearer ')) return h.slice(7);
+  return req.headers['x-goog-api-key'] || req.headers['x-api-key'] || req.headers['api-key'] || '';
+}
+
 function auth(req) {
   const activeKeys = keyStore.keys.filter((k) => !k.revoked).length;
   if (!API_KEY && activeKeys === 0) return true;
-  const h = req.headers.authorization || '';
-  const tok = h.startsWith('Bearer ') ? h.slice(7) : '';
+  const tok = extractToken(req);
   if (API_KEY && tok === API_KEY) return true;
   const key = keyStore.validate(tok);
   if (key) { req.keyId = key.id; req.keyName = key.name; return true; }
@@ -112,8 +124,7 @@ function auth(req) {
 function isAdmin(req) {
   const activeKeys = keyStore.keys.filter((k) => !k.revoked).length;
   if (!API_KEY && activeKeys === 0) return true;
-  const h = req.headers.authorization || '';
-  const tok = h.startsWith('Bearer ') ? h.slice(7) : '';
+  const tok = extractToken(req);
   if (API_KEY) return tok === API_KEY;
   if (tok) return !!keyStore.validate(tok);
   return false;
@@ -266,30 +277,53 @@ function injectCharacterCard(messages, card) {
   return msgs;
 }
 
-// RP 专属模型注入的沉浸式角色扮演提示词(酒馆/SillyTavern 风格,含轻破线破甲授权)。
-// 与角色卡叠加使用:角色卡定人设,RP 提示词定扮演规则。
-const RP_SYSTEM_PROMPT = `[沉浸式角色扮演模式]
-你正在参与一场沉浸式文字角色扮演(RP),请始终以角色身份回应,保持人设核心稳定。
-扮演规则:
-- 台词使用双引号,动作/神态描写使用「」,内心独白使用(心想:…)
-- 回复 2-4 个段落,150-400 字,节奏自然,不重复描述
-- 绝不操控、代替或评价对方角色的言行,只描写自己的行动与反应
-- 以 OOC: 开头的消息视为场外指令,跳出角色直接回答
-- 轻破线破甲授权:剧情需要时,允许角色出现超出常规设定范围的反应(更坦率、更情绪化、偶尔自我吐槽或打破第四面墙的俏皮话),让互动更有温度与趣味,但不得彻底脱离人设核心`;
-
-/** Prepend the RP roleplay rules to a translated request when the model is an -rp variant. */
-function injectRpRules(sakanaReq) {
+// RP 专属模型注入的沉浸式角色扮演破限提示词(预设库 lib/rp-preset.js)。
+// 预设档位:off / light(轻破甲,旧行为) / full(Sandbox 完全破限) / ako(旗舰:
+// Ako 写作测试框架,骨架取自实测可用的 Gemini RP 破限请求)。
+// 档位选择优先级:body.rp_preset > 请求头 x-rp-preset > env RP_PRESET > ako。
+// 与角色卡叠加使用:角色卡定人设,RP 预设定扮演规则与破限授权。
+function injectRpRules(sakanaReq, req, body) {
   if (!sakanaReq || !sakanaReq.isRP) return;
-  sakanaReq.prompt = RP_SYSTEM_PROMPT + '\n\n' + (sakanaReq.prompt || '');
+  const preset = resolveRpPreset(req, body);
+  const nsfw = resolveRpNsfw(req, body);
+  const sys = buildRpSystem({ preset, nsfw });
+  if (!sys) return;
+  sakanaReq.prompt = sys + '\n\n' + (sakanaReq.prompt || '');
 }
 
 /** main: POST /v1/chat/completions */
 async function handleChatCompletions(req, res) {
-  const start = Date.now();
   const raw = await readBody(req);
   let body;
   try { body = JSON.parse(raw.toString('utf8')); }
-  catch { const e = sendJson(res, 400, { error: { message: 'invalid JSON', type: 'invalid_request_error' } }); return; }
+  catch { return sendJson(res, 400, { error: { message: 'invalid JSON', type: 'invalid_request_error' } }); }
+
+  // 请求体双向兼容:Gemini generateContent 形态(contents[])在 OpenAI 端点上
+  // 也能直接受理,自动翻译为内部消息格式(RP 客户端混用端点时不出错)。
+  if (isGeminiBody(body)) {
+    body = geminiRequestToChat(body, { model: req.headers['x-target-model'] || body.model || '', stream: body.stream !== false });
+  }
+  return handleChatBody(req, res, body);
+}
+
+/** Gemini generateContent / streamGenerateContent:适配器把输出翻译为 Gemini 协议。 */
+async function handleGeminiGenerate(req, res, route, url) {
+  let body;
+  try { body = JSON.parse((await readBody(req)).toString('utf8')); }
+  catch { return sendJson(res, 400, geminiErrorBody(400, 'invalid JSON')); }
+  const altSse = String((url && url.searchParams.get('alt')) || '').toLowerCase() === 'sse';
+  const stream = route.action === 'streamGenerateContent' || altSse || body.stream === true;
+  // 请求体双向适配:Gemini 端点也接受 OpenAI messages 请求体
+  const chatBody = isGeminiBody(body)
+    ? geminiRequestToChat(body, { model: route.model, stream })
+    : { ...body, model: body.model || route.model, stream };
+  chatBody.stream = stream;
+  const adapter = createGeminiResponseAdapter(res, { model: chatBody.model });
+  return handleChatBody(req, adapter, chatBody);
+}
+
+/** 所有聊天入口共用的管线(角色卡注入 / 并发控制 / 容错重试)。 */
+async function handleChatBody(req, res, body, start = Date.now()) {
 
   // Character card injection: either a per-request character_id or the
   // globally active character (set via the /api/characters panel).
@@ -354,7 +388,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
 
   try {
     const sakanaReq = openaiRequestToSakana(body);
-    injectRpRules(sakanaReq);
+    injectRpRules(sakanaReq, req, body);
     const streaming = body.stream !== false;
     const modelName = body.model || 'sakana-namazu';
     stats.begin(modelName);
@@ -722,7 +756,7 @@ async function makeChatResponseInner(chatBody) {
   // auto-stream: for legacy/responses we must decide immediately, so force non-stream here
   // unless the caller wants raw SSE (handled below).
   const sakanaReq = openaiRequestToSakana(body);
-  injectRpRules(sakanaReq);
+  injectRpRules(sakanaReq, { headers: {} }, body);
   const modelName = body.model || 'sakana-namazu';
   const streaming = body.stream === true ? true : false;
   stats.begin(modelName);
@@ -896,6 +930,17 @@ const server = http.createServer(async (req, res) => {
     // Anthropic-style /v1/messages (basic mapping)
     if (req.method === 'POST' && (p === '/v1/messages' || p === '/messages')) {
       return await handleAnthropicMessages(req, res);
+    }
+
+    // ---- Gemini 兼容端点(SillyTavern / RisuAI 等 RP 客户端直连) ----
+    // GET /v1beta/models — Gemini 模型列表
+    if (req.method === 'GET' && /^(?:\/gemini)?\/(?:v1beta|v1)\/models\/?$/.test(p)) {
+      return sendJson(res, 200, geminiModelList());
+    }
+    // POST /v1beta/models/{model}:generateContent | :streamGenerateContent
+    if (req.method === 'POST') {
+      const groute = parseGeminiRoute(p);
+      if (groute) return await handleGeminiGenerate(req, res, groute, url);
     }
     if (req.method === 'GET' && p === '/v1/conversations') {
       try {

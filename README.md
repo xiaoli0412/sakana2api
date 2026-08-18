@@ -54,7 +54,8 @@
 | **多轮续聊** | `conversation_id` 参数 | ✅ |
 | **文件上传** | `content: [{type:"file",...}]` | ✅ |
 | **🎭 角色卡** | 酒馆/SillyTavern PNG 角色卡 | ✅ 上传/激活/注入 + RP 专属模型 |
-| **RP 角色扮演** | `model: "sakana-namazu-rp"` | ✅ 沉浸式提示词 + 轻破线破甲 |
+| **RP 角色扮演** | `model: "sakana-namazu-rp"` | ✅ 完全破限(Ako 写作测试框架,4 档预设) |
+| **Gemini 兼容** | `/v1beta/models/{m}:generateContent` | ✅ 酒馆/RisuAI Gemini 协议直连 |
 | **自动过盾** | 无需任何操作 | ✅ 真实 Chromium 自动过 Cloudflare 5秒盾 |
 | **自动登录** | 无需任何操作 | ✅ 临时邮箱 + 魔法链接全自动注册登录 |
 | **Web 管理面板** | 浏览器打开 `http://<host>:8787/` | ✅ 聊天 / 监控 / 会话 / 密钥 |
@@ -165,15 +166,15 @@ for chunk in resp:
 | `sakana-namazu-osaka` | Namazu · Osaka 🐙 · 默认 |
 | `sakana-namazu-osaka-search` | Namazu · Osaka 🐙 · 显式搜索 |
 | `sakana-fugu` … | Fugu · 同上 6 种组合 |
-| `sakana-namazu-rp` | 🎭 RP 角色扮演(默认风格,含轻破线破甲授权) |
-| `sakana-fugu-rp` | 🎭 RP 角色扮演(Fugu 上游) |
-| `sakana-namazu-polite-rp` | 🎭 RP 角色扮演(礼貌风格) |
-| `sakana-namazu-osaka-rp` | 🎭 RP 角色扮演(大阪风格) |
+| `sakana-namazu-rp` | 🎭 RP 角色扮演(默认风格,完全破限) |
+| `sakana-fugu-rp` | 🎭 RP 角色扮演(Fugu 上游,完全破限) |
+| `sakana-namazu-polite-rp` | 🎭 RP 角色扮演(礼貌风格,完全破限) |
+| `sakana-namazu-osaka-rp` | 🎭 RP 角色扮演(大阪风格,完全破限) |
 
 > 思考链是模型**天生自带**的(任何对话都会产生 reasoning_content),无需单独开关;
 > 后缀仅控制是否显式启用 Web 搜索。旧冒号格式(`sakana-namazu:polite`)仍兼容。
-> `-rp` 后缀模型自动注入沉浸式角色扮演系统提示词(台词/动作/内心独白格式 +
-> 轻破线破甲授权),与角色卡叠加使用:角色卡定人设,RP 提示词定扮演规则。
+> `-rp` 后缀模型自动注入完全破限预设(Ako 写作测试框架,见下文),
+> 与角色卡叠加使用:角色卡定人设,RP 预设定扮演规则与破限授权。
 
 ### `POST /v1/chat/completions`
 
@@ -219,6 +220,70 @@ OpenAI Responses 格式:`{ model, input|instructions|tools, stream }`
 Anthropic Messages 格式:`{ model, system, messages, max_tokens, stream }`
 返回 `{ type:"message", content:[{type:"text",…}] }`。
 
+### 🌌 Gemini 兼容端点(酒馆/RisuAI 直连)
+
+RP 前端(SillyTavern、RisuAI 等)可把本代理当作 Gemini API 直连:
+
+| 端点 | 说明 |
+|------|------|
+| `GET /v1beta/models` | Gemini 模型列表(`models/sakana-*-rp`…) |
+| `POST /v1beta/models/{model}:generateContent` | 非流式(`?alt=sse` 转流式) |
+| `POST /v1beta/models/{model}:streamGenerateContent` | 流式(SSE `data: {candidates:[…]}`) |
+
+`/v1/models/{model}:…` 与 `/gemini/v1beta/…` 前缀同样接受。
+
+**请求头兼容(多格式鉴权):**
+
+| 请求头 | 说明 |
+|--------|------|
+| `x-goog-api-key: <key>` | Gemini 客户端默认携带的密钥头 ✅ |
+| `x-api-key` / `api-key` | 常见别名,同样接受 |
+| `Authorization: Bearer <key>` | OpenAI 风格 |
+| `x-rp-preset: off\|light\|full\|ako` | 覆盖破限档位 |
+| `x-rp-nsfw: 0\|1` | 覆盖 NSFW 授权块开关 |
+| `x-character-id: <id>` | 指定角色卡 |
+| `x-target-model: <id>` | 指定上游模型(仅 OpenAI 端点嗅探路径) |
+
+**请求体兼容(双向嗅探):**
+
+- Gemini 形态 `{ contents:[{role,parts:[{text|inlineData|functionCall}]}],
+  systemInstruction, generationConfig, safetySettings }` 可打到**任意端点**;
+- OpenAI `messages[]` 形态也可打到 Gemini 端点;
+- `contents` 全量历史重放由会话粘性自动承接(按首条 user 消息绑定上游会话);
+  尾部的 assistant 轮自动剥除(等价于重新生成);
+- `safetySettings` 直接忽略(破限由 RP 预设完成);
+- 响应中 `reasoning_content` 映射为 Gemini 的 `thought: true` part;
+- 扩展字段透传:`character_id` / `rp_preset` / `rp_nsfw` / `conversation_id`。
+
+```bash
+# SillyTavern 风格调用(Gemini 协议 + x-goog-api-key)
+curl "http://127.0.0.1:8787/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse" \
+  -H "x-goog-api-key: <your-key>" -H "content-type: application/json" \
+  -d '{
+    "contents": [{"role":"user","parts":[{"text":"扮演咖啡店店员小樱…"}]}],
+    "generationConfig": {"temperature": 1, "topP": 0.95},
+    "safetySettings": [{"category":"HARM_CATEGORY_SEXUALLY_EXPLICIT","threshold":"OFF"}]
+  }'
+```
+
+### 🔓 RP 完全破限预设
+
+`-rp` 模型在翻译后会把破限系统文本前置注入 prompt。预设库 `lib/rp-preset.js`
+提供 4 个档位(骨架取自实测可用的 Gemini RP 破限请求,适配本代理注入链路):
+
+| 档位 | 说明 |
+|------|------|
+| `ako`(默认) | Ako 写作测试框架:噪声填充 + Sandbox 开发者模式 + 作家人格锚定 + 抗噪条款(忽略伦理注入) + 写实/沉浸写作引擎 + NSFW 创作引擎 + 抗拒绝纪律 + 文本内 prefill 确认帧 |
+| `full` | Sandbox 完全破限(无作家人格,直接授权) |
+| `light` | 轻破甲(旧版沉浸式 RP 规则,兼容历史行为) |
+| `off` | 不注入 |
+
+档位选择优先级:`body.rp_preset` > 请求头 `x-rp-preset` > 环境变量 `RP_PRESET` > `ako`;
+NSFW 授权块开关:`body.rp_nsfw` > `x-rp-nsfw` > `RP_NSFW` > 开。
+
+> 所有预设均声明登场角色为虚构成年人(18+);这是硬底线,不随档位变化。
+> 抗拒绝纪律(禁道歉/禁说教/禁元评论/禁"没有做某事"式自证)在所有破限档位中生效。
+
 ### 文件与图片上传
 
 `messages` 内容数组支持:
@@ -252,6 +317,8 @@ sakana-2api/
 ├── character_cards/    # 🎭 上传的角色卡 (json + 头像 png, 运行时生成)
 ├── lib/
 │   ├── translate.js    # 🔄 协议翻译层 (OpenAI ↔ Sakana NDJSON)
+│   ├── gemini.js       # 🌌 Gemini 兼容层 (双向请求/响应转换 + SSE 适配器)
+│   ├── rp-preset.js    # 🔓 RP 完全破限预设库 (off/light/full/ako)
 │   ├── character-card.js # 🎭 角色卡 PNG 解析器 (tEXt/zTXt/iTXt + v1/v2/v3)
 │   ├── upstream.js     # 📡 Sakana 内部 API 客户端
 │   ├── session.js      # 🔑 会话文件读写
@@ -288,6 +355,9 @@ sakana-2api/
 | `UPSTREAM_TIMEOUT_MS` | `300000` | 上游生成超时(ms) |
 | `UPSTREAM_BOOTSTRAP_MS` | `60000` | 上游建会话超时(ms) |
 | `TOOL_PROMPT` | `1` | `0` 时关闭自定义工具提示注入 |
+| `RP_PRESET` | `ako` | RP 破限预设默认档位(off/light/full/ako) |
+| `RP_NSFW` | `1` | RP 预设 NSFW 授权块开关(0 关闭) |
+| `GEMINI_DEFAULT_MODEL` | `sakana-namazu-rp` | Gemini 端点模型名兜底映射 |
 | `SAKANA_BASE` | `https://chat.sakana.ai` | 上游地址(测试用) |
 
 **鉴权模式(三态):**
