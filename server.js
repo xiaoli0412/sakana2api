@@ -1051,6 +1051,15 @@ const server = http.createServer(async (req, res) => {
 
     // Character card management
     if (p.startsWith('/api/characters')) {
+      // The avatar is a public PNG (used by <img> tags that cannot send
+      // authorization headers); everything else requires admin.
+      if (req.method === 'GET' && p.endsWith('/avatar') && p.length > 14 && !p.endsWith('active')) {
+        const id = decodeURIComponent(p.slice('/api/characters/'.length, -'/avatar'.length));
+        const card = loadCard(CARD_DIR, id);
+        if (!card || !card.avatarPath || !fs.existsSync(card.avatarPath)) return sendJson(res, 404, { error: { message: 'avatar not found' } });
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' });
+        return res.end(fs.readFileSync(card.avatarPath));
+      }
       if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
       // POST /api/characters/upload — upload a PNG character card
       if (req.method === 'POST' && p === '/api/characters/upload') {
@@ -1086,14 +1095,6 @@ const server = http.createServer(async (req, res) => {
         if (!card) return sendJson(res, 404, { error: { message: 'character not found' } });
         activeCharacter = card;
         return sendJson(res, 200, { ok: true, id: card.id, name: card.name });
-      }
-      // GET /api/characters/:id/avatar — serve the PNG avatar
-      if (req.method === 'GET' && p.endsWith('/avatar') && p.length > 14) {
-        const id = decodeURIComponent(p.slice('/api/characters/'.length, -'/avatar'.length));
-        const card = loadCard(CARD_DIR, id);
-        if (!card || !card.avatarPath || !fs.existsSync(card.avatarPath)) return sendJson(res, 404, { error: { message: 'avatar not found' } });
-        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' });
-        return res.end(fs.readFileSync(card.avatarPath));
       }
       return sendJson(res, 404, { error: { message: 'not found: ' + p, type: 'invalid_request_error' } });
     }
