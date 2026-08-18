@@ -47,6 +47,7 @@ const UI_HTML_PATH = path.join(__dirname, 'public', 'index.html');
 
 // ---- request/response audit log (in-memory ring buffer) ----
 const AUDIT_MAX = 500;
+const AUDIT_BODY_MAX = parseInt(process.env.AUDIT_BODY_MAX || '10000', 10);
 const auditLog = [];
 
 function auditEntry(req, body, status, response, error, duration) {
@@ -59,8 +60,8 @@ function auditEntry(req, body, status, response, error, duration) {
     status,
     duration,
     error: error || null,
-    reqBody: JSON.stringify(body).slice(0, 2000),
-    resBody: JSON.stringify(response).slice(0, 2000),
+    reqBody: JSON.stringify(body).slice(0, AUDIT_BODY_MAX),
+    resBody: JSON.stringify(response).slice(0, AUDIT_BODY_MAX),
   };
   auditLog.unshift(entry);
   if (auditLog.length > AUDIT_MAX) auditLog.length = AUDIT_MAX;
@@ -387,6 +388,16 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
         toolCalls.push(...cont.toolCalls);
         t = cont.t;
         lastMessageId = cont.leaf;
+      }
+
+      // Empty upstream output even after continuation: signal the client
+      // instead of returning a 200 with null content (which the user
+      // reported as "no reply with no error").
+      if (!text && !toolCalls.length) {
+        stats.finish({ stream: false, ok: false, error: 'empty upstream response', model: modelName, keyId: req.keyId });
+        saveContext(req, body, conversationId, lastMessageId);
+        auditEntry(req, body, 200, null, 'empty upstream response', Date.now() - start);
+        return sendJson(res, 200, { error: { message: 'upstream returned empty response (no content)', type: 'upstream_error', code: 'EMPTY-RESPONSE' } });
       }
 
       const finishReason = toolCalls.length && !text ? 'tool_calls' : 'stop';
@@ -764,6 +775,14 @@ async function makeChatResponseInner(chatBody) {
     } catch (e) { console.log('[tool-continue] (responses) continue round failed:', String(e.message || e).slice(0, 120)); break; }
   }
   text = stripChips(text).trim();
+  // Empty upstream output even after continuation: return an error instead
+  // of 200 OK with no content (user reported "no reply with no error").
+  if (!text) {
+    stats.finish({ stream: false, ok: false, error: 'empty upstream response', model: modelName, promptChars, completionChars: 0, keyId: null });
+    saveContext(firstUserText(body) || lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+    auditEntry({ method: 'POST', url: '/v1/responses', headers: {} }, body, 200, { error: 'empty upstream response' }, null, Date.now() - start);
+    return { content: '', reasoning, conversationId, promptTokens: 0, completionTokens: 0, error: 'empty upstream response' };
+  }
   const promptTokens = Math.round(promptChars / 4);
   const completionTokens = Math.round((text.length + reasoning.length) / 4);
   stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: null });
@@ -816,6 +835,20 @@ const server = http.createServer(async (req, res) => {
         const conv = await upstream.getConversation(id);
         return sendJson(res, 200, conv);
       } catch (e) { return sendJson(res, 500, { error: { message: String(e.message) } }); }
+    }
+    // Stop an in-flight generation (used by the chat panel's stop button).
+    // Route to the account that owns the conversation via the context store.
+    if (req.method === 'POST' && p.startsWith('/v1/conversations/') && p.endsWith('/stop')) {
+      try {
+        const id = decodeURIComponent(p.slice('/v1/conversations/'.length, -'/stop'.length));
+        const ctxEntry = contextStore.lookup('id:' + id);
+        const acct = (ctxEntry && ctxEntry.accountId) ? accountPool.get(ctxEntry.accountId) : null;
+        await als.run({ session: acct }, () => upstream.stopGeneration(id));
+        return sendJson(res, 200, { ok: true });
+      } catch (e) {
+        // Stop is best-effort — the client already detached; never 5xx it.
+        return sendJson(res, 200, { ok: true, note: String(e.message || e).slice(0, 80) });
+      }
     }
 
     // Management endpoints

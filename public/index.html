@@ -1641,8 +1641,8 @@
                 <div class="chat-controls-left">
                   <button class="toggle-btn" id="btnAttachFile" title="添加附件或图片">➕ 附件</button>
                   <select class="chat-select mono" id="chatModelSelect"></select>
-                  <button class="toggle-btn" id="btnToggleThink" title="深度思考链(与联网互斥)">🧠 思考</button>
-                  <button class="toggle-btn active" id="btnToggleSearch" title="联网搜索(与思考互斥)">🌐 联网</button>
+                  <button class="toggle-btn active" id="btnToggleThink" title="深度思考链(必带,与联网互斥)">🧠 思考</button>
+                  <button class="toggle-btn active" id="btnToggleSearch" title="联网搜索(与思考互斥,思考开启时联网降级)">🌐 联网</button>
                 </div>
                 <div style="display:flex;gap:6px">
                   <button class="btn primary sm" id="btnSendChat" style="padding:6px 16px;font-weight:700">↑ 发送</button>
@@ -1983,6 +1983,7 @@ for chunk in response:
 const $ = id => document.getElementById(id);
 let activeTab = 'dash';
 let statsData = null;
+let lastCacheStats = { size: 0, hitRate: '0%' };
 let auditLogs = [];
 let availableModels = [];
 
@@ -2166,6 +2167,8 @@ async function refreshStats() {
     const res = await apiFetch('/api/stats');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     statsData = await res.json();
+    const st = statsData;
+    lastCacheStats = { size: st.cache?.size || 0, hitRate: st.cache?.hitRate || '0%' };
     updateDashboardUI(statsData);
   } catch (e) {
     console.error('refreshStats err:', e);
@@ -2433,9 +2436,9 @@ function renderModelRanks(byModel) {
       <td class="mono" style="font-weight:600;color:var(--text-main)">${esc(m.name)}</td>
       <td class="mono">${m.requests}</td>
       <td class="mono">${fmtK(m.pTok)}</td>
-      <td class="mono">0</td>
+      <td class="mono">${lastCacheStats.size}</td>
       <td class="mono">${fmtK(m.cTok)}</td>
-      <td>0</td>
+      <td>${lastCacheStats.hitRate}</td>
       <td class="mono">${fmtK(m.totalTok)}</td>
       <td class="mono" style="color:var(--emerald-glow)">$${m.cost}</td>
     </tr>
@@ -2445,6 +2448,8 @@ function renderModelRanks(byModel) {
 /* ================= TAB 2: CHAT ================= */
 let activeConversationId = null;
 let isGenerating = false;
+let activeAbort = null;      // AbortController of the in-flight request (stop button)
+let abortedByUser = false;
 let chatSessions = JSON.parse(localStorage.getItem('sakana_chat_sessions') || '[]');
 const chatAttachments = [];
 
@@ -2517,13 +2522,13 @@ function createNewChatSession(title = '新聊天') {
   const id = 'conv_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
   const sess = { id, title, messages: [], createdAt: Date.now() };
   chatSessions.unshift(sess);
-  localStorage.setItem('sakana_chat_sessions', JSON.stringify(chatSessions));
+  saveChatSessions();
   selectChatSession(id);
 }
 
 function deleteChatSession(id) {
   chatSessions = chatSessions.filter(s => s.id !== id);
-  localStorage.setItem('sakana_chat_sessions', JSON.stringify(chatSessions));
+  saveChatSessions();
   if (activeConversationId === id) {
     if (chatSessions.length) selectChatSession(chatSessions[0].id);
     else createNewChatSession();
@@ -2538,7 +2543,7 @@ $('btnClearChat').onclick = () => {
   const sess = chatSessions.find(s => s.id === activeConversationId);
   if (sess) {
     sess.messages = [];
-    localStorage.setItem('sakana_chat_sessions', JSON.stringify(chatSessions));
+    saveChatSessions();
     selectChatSession(activeConversationId);
     toast('已清屏');
   }
@@ -2560,7 +2565,13 @@ document.querySelectorAll('.preset-card').forEach(card => {
   card.onclick = () => {
     const p = card.dataset.preset;
     const title = card.querySelector('.p-title').textContent;
-    createNewChatSession(title);
+    // Switch to the preset model without creating a new session, unless
+    // there is no active conversation yet.
+    if (!activeConversationId) {
+      createNewChatSession(title);
+    } else {
+      toast('已切换预设: ' + title);
+    }
     if (p === 'translate') {
       if ($('chatModelSelect')) $('chatModelSelect').value = 'sakana-namazu';
     } else if (p === 'fugu') {
@@ -2589,7 +2600,7 @@ $('btnToggleSearch').onclick = () => {
   if (searchOn) $('btnToggleThink').classList.remove('active');
 };
 
-// Attachment handling
+// Attachment handling (file picker + paste/drop into the input)
 $('btnAttachFile').onclick = () => $('fileUploadInput').click();
 $('fileUploadInput').onchange = (e) => {
   for (const file of e.target.files) {
@@ -2602,6 +2613,47 @@ $('fileUploadInput').onchange = (e) => {
   }
   e.target.value = '';
 };
+$('chatInput').onpaste = (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (!files.length) return; // allow normal text paste
+  e.preventDefault();
+  for (const file of files) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      chatAttachments.push({ name: file.name || 'pasted.png', dataUrl: reader.result, type: file.type });
+      renderAttachmentsPreview();
+      toast(`已附加 ${file.name || '剪贴板图片'}`);
+    };
+    reader.readAsDataURL(file);
+  }
+};
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => {
+  const files = [...(e.dataTransfer?.files || [])];
+  if (!files.length) return;
+  const inChat = e.target.closest?.('.chat-input-card, #chatViewport') || e.target.id === 'chatViewport';
+  if (!inChat) return;
+  e.preventDefault();
+  for (const file of files) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      chatAttachments.push({ name: file.name, dataUrl: reader.result, type: file.type });
+      renderAttachmentsPreview();
+    };
+    reader.readAsDataURL(file);
+  }
+});
+
+// Cap the base64 attachment size stored in localStorage: huge image dataUrls
+// blow past the 5MB quota on history save. The live message keeps it; the
+// persisted copy degrades to name-only (re-upload to re-attach).
+const MAX_STORED_ATTACHMENT = 250 * 1024;
+function sanitizeAttachmentsForStore(files) {
+  return (files || []).map(f => {
+    if (!f || !f.dataUrl || f.dataUrl.length <= MAX_STORED_ATTACHMENT) return f;
+    return { name: f.name, type: f.type, dataUrl: null };
+  });
+}
 
 function renderAttachmentsPreview() {
   const p = $('attachmentsPreview');
@@ -2657,7 +2709,7 @@ function appendMsgToUI(role, text, reasoning = '', citations = [], files = []) {
     filesHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">';
     files.forEach(f => {
       const isImg = f.dataUrl?.startsWith('data:image/');
-      filesHtml += `<span class="attach-chip">${isImg ? `<img src="${f.dataUrl}">` : '📄'} ${esc(f.name)}</span>`;
+      filesHtml += `<span class="attach-chip">${isImg ? `<img src="${f.dataUrl}">` : '📄'} ${esc(f.name)}${f.dataUrl ? '' : '<span style="opacity:.6">(已过大未保存)</span>'}</span>`;
     });
     filesHtml += '</div>';
   }
@@ -2665,7 +2717,7 @@ function appendMsgToUI(role, text, reasoning = '', citations = [], files = []) {
   let thinkingHtml = '';
   if (reasoning) {
     thinkingHtml = `
-      <details class="thinking-box" open>
+      <details class="thinking-box">
         <summary>💭 深度思考过程</summary>
         <div class="thinking-text">${esc(reasoning)}</div>
       </details>
@@ -2706,11 +2758,40 @@ function scrollChatBottom() {
   if (vp) vp.scrollTop = vp.scrollHeight;
 }
 
+/** Build OpenAI content parts for a stored message (text + attachments). */
+function messageToContent(m) {
+  const parts = [];
+  if (m.content) parts.push({ type: 'text', text: m.content });
+  for (const f of m.files || []) {
+    if (!f || !f.dataUrl) continue;
+    if (f.type?.startsWith('image/')) parts.push({ type: 'image_url', image_url: { url: f.dataUrl } });
+    else parts.push({ type: 'file', name: f.name, mime: f.type || 'application/octet-stream', file_url: f.dataUrl });
+  }
+  return parts.length === 1 ? parts[0].text : parts;
+}
+
+/** Stop the in-flight generation: abort the fetch AND tell the backend to
+ *  cancel the upstream turn (otherwise the account keeps generating). */
+function stopChatGeneration() {
+  if (!isGenerating) return;
+  abortedByUser = true;
+  try { activeAbort?.abort(); } catch {}
+  const sess = chatSessions.find(s => s.id === activeConversationId);
+  if (sess && sess.conversationId) {
+    fetch('/v1/conversations/' + encodeURIComponent(sess.conversationId) + '/stop', {
+      method: 'POST',
+      headers: { ...getAuthHeaders() },
+    }).catch(() => {});
+  }
+}
+
 async function sendChatMessage() {
   const input = $('chatInput');
   const text = input.value.trim();
   if (!text && !chatAttachments.length) return;
-  if (isGenerating) return;
+
+  // Buttons shows "⏹ 停止" while generating — clicking now stops instead.
+  if (isGenerating) { stopChatGeneration(); return; }
 
   if (!activeConversationId) createNewChatSession();
   const currentSess = chatSessions.find(s => s.id === activeConversationId);
@@ -2728,37 +2809,31 @@ async function sendChatMessage() {
     $('chatCurrentTitle').textContent = currentSess.title;
     renderChatSessions();
   }
-  localStorage.setItem('sakana_chat_sessions', JSON.stringify(chatSessions));
+  saveChatSessions();
 
   isGenerating = true;
+  abortedByUser = false;
+  const ctrl = new AbortController();
+  activeAbort = ctrl;
   $('btnSendChat').textContent = '⏹ 停止';
   $('btnSendChat').classList.add('danger');
 
   const aiRow = appendMsgToUI('assistant', '');
   const bodyContentEl = aiRow.querySelector('.body-content');
   bodyContentEl.classList.add('typing-cursor');
-  
+
   let aiReasoning = '';
   let aiAnswer = '';
   let aiCitations = [];
 
   const model = $('chatModelSelect').value || 'sakana-namazu';
-  const content = [];
-  if (text) content.push({ type: 'text', text });
-  for (const f of savedFiles) {
-    if (f.type.startsWith('image/')) {
-      content.push({ type: 'image_url', image_url: { url: f.dataUrl } });
-    } else {
-      content.push({ type: 'file', name: f.name, data: f.dataUrl });
-    }
-  }
-
   const isSearchActive = $('btnToggleSearch')?.classList.contains('active') ?? true;
   const isThinkActive = $('btnToggleThink')?.classList.contains('active') ?? true;
 
   const reqBody = {
     model,
-    messages: currentSess.messages.map(m => ({ role: m.role, content: m.content })),
+    messages: currentSess.messages.map(m => ({ role: m.role, content: messageToContent(m) })),
+    ...(currentSess.conversationId ? { conversation_id: currentSess.conversationId } : {}),
     stream: true,
     web_search: isSearchActive,
     enable_thinking: isThinkActive,
@@ -2769,7 +2844,16 @@ async function sendChatMessage() {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify(reqBody),
+      signal: ctrl.signal,
     });
+
+    // Remember the upstream conversation id — needed for stickiness on the
+    // next turn and for the stop button to cancel the live generation.
+    const convH = resp.headers.get('x-conversation-id');
+    if (convH) {
+      currentSess.conversationId = convH;
+      saveChatSessions();
+    }
 
     if (!resp.ok || !resp.body) {
       const err = await resp.json().catch(() => ({}));
@@ -2782,7 +2866,7 @@ async function sendChatMessage() {
 
     while (true) {
       const { value, done } = await reader.read();
-      if (done) break;
+      if (done) { buf += dec.decode(); break; }
       buf += dec.decode(value, { stream: true });
       const lines = buf.split('\n');
       buf = lines.pop() || '';
@@ -2800,7 +2884,6 @@ async function sendChatMessage() {
           if (!thEl) {
             thEl = document.createElement('details');
             thEl.className = 'thinking-box';
-            thEl.open = true;
             thEl.innerHTML = '<summary>💭 深度思考过程</summary><div class="thinking-text"></div>';
             aiRow.querySelector('.msg-bubble').insertBefore(thEl, bodyContentEl);
           }
@@ -2811,6 +2894,23 @@ async function sendChatMessage() {
         }
         if (o.citations) aiCitations = o.citations;
         scrollChatBottom();
+      }
+    }
+    // Flush the tail buffer: the final data: line can arrive without a
+    // trailing newline (same loss the server-side stress parsers had).
+    if (buf.trim()) {
+      const line = buf.trim();
+      if (line.startsWith('data: ')) {
+        const payload = line.slice(6).trim();
+        if (payload !== '[DONE]') {
+          let o; try { o = JSON.parse(payload); } catch { o = null; }
+          if (o) {
+            const delta = o.choices?.[0]?.delta || {};
+            if (delta.content) { aiAnswer += delta.content; }
+            if (delta.reasoning_content) { aiReasoning += delta.reasoning_content; }
+            if (o.citations) aiCitations = o.citations;
+          }
+        }
       }
     }
 
@@ -2831,15 +2931,62 @@ async function sendChatMessage() {
     }
 
     currentSess.messages.push({ role: 'assistant', content: aiAnswer, reasoning: aiReasoning, citations: aiCitations, ts: Date.now() });
-    localStorage.setItem('sakana_chat_sessions', JSON.stringify(chatSessions));
+    saveChatSessions();
   } catch (e) {
     bodyContentEl.classList.remove('typing-cursor');
-    bodyContentEl.innerHTML = `<span style="color:var(--rose)">⚠️ 请求发生错误: ${esc(e.message)}</span>`;
+    if (e.name === 'AbortError' && abortedByUser) {
+      // User pressed stop — keep whatever streamed so far.
+      if (aiAnswer || aiReasoning) {
+        bodyContentEl.innerHTML = renderMarkdown(aiAnswer);
+        currentSess.messages.push({ role: 'assistant', content: aiAnswer, reasoning: aiReasoning, citations: aiCitations, ts: Date.now() });
+        saveChatSessions();
+      } else {
+        bodyContentEl.innerHTML = '<span style="color:var(--text-dim)">⏹ 已停止生成</span>';
+      }
+    } else {
+      bodyContentEl.innerHTML = `<span style="color:var(--rose)">⚠️ 请求发生错误: ${esc(e.message)}</span> <button class="btn sm" style="margin-left:8px" onclick="retryLastChatMessage()">🔄 重试</button>`;
+    }
   }
 
   isGenerating = false;
+  activeAbort = null;
   $('btnSendChat').textContent = '↑ 发送';
   $('btnSendChat').classList.remove('danger');
+}
+
+/** Re-send the last user message after an error (drops the failed assistant row). */
+window.retryLastChatMessage = function() {
+  const sess = chatSessions.find(s => s.id === activeConversationId);
+  if (!sess || isGenerating) return;
+  let lastUserIdx = -1;
+  for (let i = sess.messages.length - 1; i >= 0; i--) {
+    if (sess.messages[i].role === 'user') { lastUserIdx = i; break; }
+  }
+  if (lastUserIdx === -1) return;
+  // Remove the failed assistant turn (everything after the last user msg).
+  sess.messages = sess.messages.slice(0, lastUserIdx + 1);
+  // Restore attachments into the input so they are sent again.
+  const lastUser = sess.messages[lastUserIdx];
+  if (lastUser && lastUser.files && lastUser.files.length) {
+    lastUser.files.forEach(f => {
+      if (f.dataUrl) chatAttachments.push({ name: f.name, dataUrl: f.dataUrl, type: f.type || '' });
+    });
+    renderAttachmentsPreview();
+  }
+  saveChatSessions();
+  selectChatSession(activeConversationId);
+  if (lastUser && lastUser.content) {
+    $('chatInput').value = lastUser.content;
+    $('chatInput').style.height = 'auto';
+    sendChatMessage();
+  }
+};
+
+function saveChatSessions() {
+  try {
+    const snapshot = chatSessions.map(s => ({ ...s, messages: (s.messages || []).map(m => ({ ...m, files: sanitizeAttachmentsForStore(m.files) })) }));
+    localStorage.setItem('sakana_chat_sessions', JSON.stringify(snapshot));
+  } catch {}
 }
 
 $('btnSendChat').onclick = sendChatMessage;
