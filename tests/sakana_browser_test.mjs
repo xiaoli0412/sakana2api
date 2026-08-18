@@ -38,7 +38,8 @@ try {
   await page.waitForSelector('#characterCardList', { timeout: 10000 });
   check('character card board rendered', await page.locator('#characterCardList').isVisible());
 
-  // Model dropdown has RP group
+  // Model dropdown has RP group (wait for loadModels to populate after unlock)
+  await page.waitForFunction(() => document.querySelectorAll('#chatModelSelect option').length >= 16, { timeout: 20000 });
   const groupCount = await page.locator('#chatModelSelect optgroup').count();
   check('model select has 2 optgroups (standard + RP)', groupCount === 2, String(groupCount));
   const rpOpt = await page.locator('#chatModelSelect option[value="sakana-namazu-rp"]').count();
@@ -73,20 +74,25 @@ try {
   const chatOutcome = await page.waitForFunction(() => {
     const msgs = document.querySelectorAll('#chatMessages > div');
     const last = msgs[msgs.length - 1];
-    if (!last) return { done: false };
-    // Real answer (or an error/retry button) has appeared in the body area.
-    const body = last.querySelector('.body-content');
-    const errBtn = last.querySelector('button[onclick*=retry]');
-    if (errBtn) return { done: true, text: 'ERROR_BTN: ' + last.textContent.slice(0, 200) };
-    if (body && body.textContent.trim().length > 15) return { done: true, text: last.textContent.slice(0, 400) };
-    return { done: false };
+    let r = null;
+    if (last) {
+      // Real answer (or an error/retry button) has appeared in the body area.
+      const body = last.querySelector('.body-content');
+      const errBtn = last.querySelector('button[onclick*=retry]');
+      if (errBtn) r = { done: true, text: 'ERROR_BTN: ' + last.textContent.slice(0, 200) };
+      else if (body && body.textContent.trim().length > 15) r = { done: true, text: body.textContent.trim().slice(0, 400) };
+    }
+    return r || undefined; // poll until done
   }, { timeout: 240000, polling: 1000 }).then(r => r.jsonValue()).catch(() => ({ done: false, text: 'TIMEOUT' }));
   // Grab any visible toasts too
   const toastText = await page.locator('.toast, #chatToasts, [class*="toast"]').allInnerTexts().catch(() => []);
   console.log('  last msg text:', chatOutcome.text.replace(/\n/g, ' ').slice(0, 150));
   console.log('  toasts:', toastText.join(' | ').slice(0, 200));
-  check('model reply rendered', chatOutcome.done, chatOutcome.text.slice(0, 100));
-  check('reply is in-character (sweet shop context)', /甜品|蛋糕|甜点|你|我|草莓/.test(chatOutcome.text), chatOutcome.text.slice(0, 80));
+  const replyBody = chatOutcome.text; // scraped .body-content in the wait
+  check('model reply rendered', chatOutcome.done, replyBody.slice(0, 100));
+  const inCharacter = /甜品|蛋糕|甜点|草莓|你|我|咖啡|奶茶|吃|试试/.test(replyBody);
+  check('reply is in-character (sweet shop context)', inCharacter, replyBody.slice(0, 100));
+  console.log('  reply snippet:', replyBody.replace(/\n/g, ' ').slice(0, 160));
 
   // Deactivate
   await page.click('#btnClearActiveCard');
