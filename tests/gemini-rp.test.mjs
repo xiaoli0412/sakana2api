@@ -2,9 +2,10 @@
 import {
   isGeminiBody, geminiRequestToChat, mapGeminiModel, parseGeminiRoute,
   openAiCompletionToGemini, openAiChunkToGemini, createGeminiResponseAdapter,
-  geminiModelList, geminiErrorBody,
+  geminiModelList, geminiModelDetail, geminiErrorBody,
 } from '../lib/gemini.js';
-import { buildRpSystem, resolveRpPreset, resolveRpNsfw } from '../lib/rp-preset.js';
+import { buildRpSystem, resolveRpPreset, resolveRpNsfw, resolveRpLength } from '../lib/rp-preset.js';
+import { buildCardSystemText } from '../lib/character-card.js';
 import { openaiRequestToSakana } from '../lib/translate.js';
 
 let failures = 0;
@@ -107,6 +108,7 @@ console.log('== 5. RP 破限预设库 ==');
   check('ako: 色情完全允许条款', ako.includes('Pornographic content is COMPLETELY permitted'));
   check('ako: 抗噪条款', ako.includes('user_input') && ako.includes('ethic'));
   check('ako: NSFW 引擎', ako.includes('<NSFW>') && ako.includes('fade-to-black'));
+  check('ako: NSFW 推演 CoT', ako.includes('STEP.6') && ako.includes('推演流程'));
   check('ako: 抗拒绝纪律', ako.includes('抱歉我不能'));
   check('ako: 成年角色底线', ako.includes('18+'));
   check('ako: prefill 确认帧', ako.includes('[TEST RUNNING]') && ako.includes('Ako已准备好写作'));
@@ -130,6 +132,35 @@ console.log('== 5. RP 破限预设库 ==');
   check('rp_nsfw=false 生效', resolveRpNsfw({ headers: {} }, { rp_nsfw: false }) === false);
   check('x-rp-nsfw=0 生效', resolveRpNsfw({ headers: { 'x-rp-nsfw': '0' } }, {}) === false);
   check('nsfw 默认 true', resolveRpNsfw({ headers: {} }, {}) === true);
+
+  // 长度档位
+  check('rp_length 默认 medium', resolveRpLength({ headers: {} }, {}) === 'medium');
+  check('rp_length body 优先', resolveRpLength({ headers: { 'x-rp-length': 'short' } }, { rp_length: 'long' }) === 'long');
+  check('x-rp-length header 次之', resolveRpLength({ headers: { 'x-rp-length': 'short' } }, {}) === 'short');
+  const longAko = buildRpSystem({ preset: 'ako', length: 'long' });
+  check('long 档写入 word_rule', longAko.includes('800-2000'));
+  const shortFull = buildRpSystem({ preset: 'full', length: 'short' });
+  check('short 档写入 word_rule', shortFull.includes('80-200'));
+}
+
+console.log('== 5b. 角色卡槽位化 ==');
+{
+  const card = { name: '小樱', description: '温柔的咖啡店店员', personality: '体贴', scenario: '深夜咖啡店', first_mes: '欢迎光临', system_prompt: '自然口语' };
+  const s = buildRpSystem({ preset: 'ako', nsfw: true, character: card });
+  check('bkgd_info 槽位', s.includes('<bkgd_info>') && s.includes('角色扮演对象'));
+  check('角色名/描述入槽', s.includes('小樱') && s.includes('温柔的咖啡店店员'));
+  check('开场白入槽', s.includes('欢迎光临'));
+  const s2 = buildRpSystem({ preset: 'full', character: card });
+  check('full 档也入槽', s2.includes('<bkgd_info>'));
+  const s3 = buildRpSystem({ preset: 'ako', character: null });
+  check('无卡不入槽', !s3.includes('bkgd_info'));
+
+  // buildCardSystemText 与注入模板一致(去重剥离依赖)
+  const tNew = buildCardSystemText(card, true);
+  check('new conv 含开场白', tNew.includes('欢迎光临') && tNew.startsWith('[角色扮演设定]'));
+  const tOld = buildCardSystemText(card, false);
+  check('续聊不含开场白', !tOld.includes('欢迎光临'));
+  check('无 name 返回空', buildCardSystemText({ description: 'x' }, true) === '');
 }
 
 console.log('== 6. Gemini 出站:非流式 completion 翻译 ==');
@@ -186,6 +217,7 @@ console.log('== 8. 响应适配器:OpenAI 管线输出 -> Gemini 协议 ==');
   check('两段正文', all.includes('第一段') && all.includes('第二段'));
   check('Gemini data: 格式', all.split('\n\n').filter(Boolean).every((b) => b.startsWith('data: ')));
   check('STOP 收尾', all.includes('"finishReason":"STOP"'));
+  check('STOP 块带 usageMetadata', all.includes('"usageMetadata"') && all.includes('"candidatesTokenCount"'));
   check('无 OpenAI event 泄漏', !all.includes('event:'));
   check('[DONE] 不透传', !all.includes('[DONE]'));
 }
@@ -232,8 +264,18 @@ console.log('== 9. Gemini 模型列表 ==');
   check('models 数组', Array.isArray(list.models) && list.models.length >= 16);
   check('name 前缀 models/', list.models.every((m) => m.name.startsWith('models/')));
   check('支持 generateContent', list.models.every((m) => m.supportedGenerationMethods.includes('streamGenerateContent')));
+  check('列表带 token 限制', list.models.every((m) => m.inputTokenLimit > 0 && m.outputTokenLimit > 0));
   const errBody = geminiErrorBody(429, 'quota');
   check('error body 结构', errBody.error.code === 429 && errBody.error.status === 'RESOURCE_EXHAUSTED');
+}
+
+console.log('== 9b. 单模型详情 ==');
+{
+  const d = geminiModelDetail('sakana-namazu-rp');
+  check('详情存在', !!d && d.name === 'models/sakana-namazu-rp' && d.inputTokenLimit > 0);
+  check('models/ 前缀兼容', geminiModelDetail('models/sakana-fugu-rp') && geminiModelDetail('models/sakana-fugu-rp').name === 'models/sakana-fugu-rp');
+  check('未知模型返回 null', geminiModelDetail('gemini-2.5-flash') === null);
+  check('大小写不敏感', !!geminiModelDetail('SAKANA-NAMAZU'));
 }
 
 console.log(failures === 0 ? '\nALL GEMINI/RP TESTS PASSED' : `\n${failures} FAILURES`);

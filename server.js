@@ -15,11 +15,11 @@ const { AccountPool } = require('./lib/account-pool');
 const { Cache } = require('./lib/cache');
 const { ContextStore, firstUserText, lastUserText } = require('./lib/context');
 const { concurrencyManager } = require('./lib/concurrency');
-const { parsePngCard, normalizeCard, saveCard, loadCard, listCards } = require('./lib/character-card');
-const { buildRpSystem, resolveRpPreset, resolveRpNsfw } = require('./lib/rp-preset');
+const { parsePngCard, normalizeCard, saveCard, loadCard, listCards, buildCardSystemText } = require('./lib/character-card');
+const { buildRpSystem, resolveRpPreset, resolveRpNsfw, resolveRpLength } = require('./lib/rp-preset');
 const {
   isGeminiBody, geminiRequestToChat, parseGeminiRoute, geminiModelList,
-  geminiErrorBody, createGeminiResponseAdapter,
+  geminiModelDetail, geminiErrorBody, createGeminiResponseAdapter,
 } = require('./lib/gemini');
 
 // Bind ONE account to the whole request: createConversation + streamGenerate
@@ -104,11 +104,18 @@ function sseHeaders(res) {
 
 // Auth: open when nothing enforced.
 // 多格式请求头适配:Authorization: Bearer / x-goog-api-key(Gemini 客户端) /
-// x-api-key / api-key 均可携带密钥。
+// goog-api-key / x-api-key / api-key;另支持 Gemini 官方 ?key= 查询参数。
 function extractToken(req) {
   const h = req.headers.authorization || '';
   if (h.startsWith('Bearer ')) return h.slice(7);
-  return req.headers['x-goog-api-key'] || req.headers['x-api-key'] || req.headers['api-key'] || '';
+  const key = req.headers['x-goog-api-key'] || req.headers['goog-api-key'] ||
+    req.headers['x-api-key'] || req.headers['api-key'];
+  if (key) return key;
+  try {
+    const q = new URL(req.url, 'http://x').searchParams.get('key');
+    if (q) return q;
+  } catch {}
+  return '';
 }
 
 function auth(req) {
@@ -257,19 +264,9 @@ function saveContext(req, body, conversationId, lastMessageId, explicitAccountId
 function injectCharacterCard(messages, card) {
   if (!card || !card.name || !Array.isArray(messages)) return messages;
   const msgs = [...messages];
-  const parts = [];
-  if (card.description) parts.push(`[角色描述]\n${card.description}`);
-  if (card.personality) parts.push(`[性格特征]\n${card.personality}`);
-  if (card.scenario) parts.push(`[场景设定]\n${card.scenario}`);
-  if (card.system_prompt) parts.push(`[系统提示]\n${card.system_prompt}`);
   const isNewConversation = !msgs.some(m => m.role === 'assistant');
-  // The greeting is part of the character identity: upstream history is carried
-  // by conversation_id and assistant messages are not replayed, so the opening
-  // line must live in the system text for the first turn.
-  if (card.first_mes && isNewConversation) parts.push(`[开场白]\n${card.first_mes}`);
-  if (parts.length) {
-    msgs.unshift({ role: 'system', content: `[角色扮演设定]\n你正在扮演 ${card.name}。以下是角色设定，请严格遵守角色人设，以第一人称沉浸式扮演。\n\n${parts.join('\n\n')}` });
-  }
+  const sysText = buildCardSystemText(card, isNewConversation);
+  if (sysText) msgs.unshift({ role: 'system', content: sysText });
   // first_mes as the first assistant message if the conversation is new
   if (card.first_mes && isNewConversation) {
     msgs.push({ role: 'assistant', content: card.first_mes });
@@ -281,13 +278,40 @@ function injectCharacterCard(messages, card) {
 // 预设档位:off / light(轻破甲,旧行为) / full(Sandbox 完全破限) / ako(旗舰:
 // Ako 写作测试框架,骨架取自实测可用的 Gemini RP 破限请求)。
 // 档位选择优先级:body.rp_preset > 请求头 x-rp-preset > env RP_PRESET > ako。
-// 与角色卡叠加使用:角色卡定人设,RP 预设定扮演规则与破限授权。
+// 长度档位:body.rp_length > 请求头 x-rp-length > env RP_LENGTH > medium。
+// 与角色卡叠加使用:ako/full 档位会把角色卡数据槽位化进 <bkgd_info> 段,
+// 并从 prompt 中剥离重复注入的角色卡 system 文本(避免同一设定出现两次)。
 function injectRpRules(sakanaReq, req, body) {
   if (!sakanaReq || !sakanaReq.isRP) return;
   const preset = resolveRpPreset(req, body);
   const nsfw = resolveRpNsfw(req, body);
-  const sys = buildRpSystem({ preset, nsfw });
+  const length = resolveRpLength(req, body);
+  let sys = buildRpSystem({ preset, nsfw, length });
   if (!sys) return;
+
+  // 角色卡槽位化(仅 ako/full 档):解析卡 → 嵌入框架 → 剥离重复 system 文本
+  if (preset === 'ako' || preset === 'full' || preset === 'sandbox') {
+    try {
+      const charId = body.character_id || req.headers['x-character-id'] || '';
+      const card = charId ? loadCard(CARD_DIR, charId) : activeCharacter;
+      if (card && card.name) {
+        const embedded = buildRpSystem({ preset, nsfw, length, character: card });
+        if (embedded) sys = embedded;
+        // isNewConv 必须与注入时刻一致:角色卡注入后会把 first_mes 作为
+        // assistant 消息追加,导致"存在 assistant"误判 → 特判末尾即 first_mes。
+        const msgs = Array.isArray(body.messages) ? body.messages : [];
+        const lastMsg = msgs[msgs.length - 1];
+        const firstMesPushed = !!(card.first_mes && lastMsg && lastMsg.role === 'assistant' && lastMsg.content === card.first_mes);
+        const isNewConv = firstMesPushed || !msgs.some((m) => m && m.role === 'assistant');
+        const dupText = buildCardSystemText(card, isNewConv);
+        const p = sakanaReq.prompt || '';
+        if (dupText && p.startsWith(dupText)) {
+          sakanaReq.prompt = p.slice(dupText.length).replace(/^\n+/, '');
+        }
+      }
+    } catch (e) { console.log('[rp-preset] card slot error:', String(e.message || e).slice(0, 120)); }
+  }
+
   sakanaReq.prompt = sys + '\n\n' + (sakanaReq.prompt || '');
 }
 
@@ -393,7 +417,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     const modelName = body.model || 'sakana-namazu';
     stats.begin(modelName);
     let promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
-    if (process.env.DEBUG_PROMPT) console.log('[prompt:' + modelName + ']', (sakanaReq.prompt || '').slice(0, 500).replace(/\n/g, '\\n'));
+    if (process.env.DEBUG_PROMPT) console.log('[prompt:' + modelName + ']', (sakanaReq.prompt || '').slice(0, parseInt(process.env.DEBUG_PROMPT_LEN || '500', 10)).replace(/\n/g, '\\n'));
 
     // Extract text-based files
     if (sakanaReq.files && sakanaReq.files.length > 0) {
@@ -761,7 +785,7 @@ async function makeChatResponseInner(chatBody) {
   const streaming = body.stream === true ? true : false;
   stats.begin(modelName);
   let promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
-  if (process.env.DEBUG_PROMPT) console.log('[prompt:' + modelName + ']', (sakanaReq.prompt || '').slice(0, 500).replace(/\n/g, '\\n'));
+  if (process.env.DEBUG_PROMPT) console.log('[prompt:' + modelName + ']', (sakanaReq.prompt || '').slice(0, parseInt(process.env.DEBUG_PROMPT_LEN || '500', 10)).replace(/\n/g, '\\n'));
 
   // Extract text-based files
   if (sakanaReq.files && sakanaReq.files.length > 0) {
@@ -936,6 +960,15 @@ const server = http.createServer(async (req, res) => {
     // GET /v1beta/models — Gemini 模型列表
     if (req.method === 'GET' && /^(?:\/gemini)?\/(?:v1beta|v1)\/models\/?$/.test(p)) {
       return sendJson(res, 200, geminiModelList());
+    }
+    // GET /v1beta/models/{model} — 单模型详情(部分客户端启动时校验模型)
+    if (req.method === 'GET') {
+      const single = /^(?:\/gemini)?\/(?:v1beta|v1)\/models\/([^/]+)\/?$/.exec(p);
+      if (single) {
+        const detail = geminiModelDetail(decodeURIComponent(single[1]));
+        if (!detail) return sendJson(res, 404, geminiErrorBody(404, 'model not found: ' + single[1]));
+        return sendJson(res, 200, detail);
+      }
     }
     // POST /v1beta/models/{model}:generateContent | :streamGenerateContent
     if (req.method === 'POST') {

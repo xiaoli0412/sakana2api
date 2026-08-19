@@ -226,7 +226,8 @@ RP 前端(SillyTavern、RisuAI 等)可把本代理当作 Gemini API 直连:
 
 | 端点 | 说明 |
 |------|------|
-| `GET /v1beta/models` | Gemini 模型列表(`models/sakana-*-rp`…) |
+| `GET /v1beta/models` | Gemini 模型列表(`models/sakana-*-rp`…,含 token 限制) |
+| `GET /v1beta/models/{model}` | 单模型详情(客户端启动校验用) |
 | `POST /v1beta/models/{model}:generateContent` | 非流式(`?alt=sse` 转流式) |
 | `POST /v1beta/models/{model}:streamGenerateContent` | 流式(SSE `data: {candidates:[…]}`) |
 
@@ -237,10 +238,12 @@ RP 前端(SillyTavern、RisuAI 等)可把本代理当作 Gemini API 直连:
 | 请求头 | 说明 |
 |--------|------|
 | `x-goog-api-key: <key>` | Gemini 客户端默认携带的密钥头 ✅ |
-| `x-api-key` / `api-key` | 常见别名,同样接受 |
+| `goog-api-key` / `x-api-key` / `api-key` | 常见别名,同样接受 |
 | `Authorization: Bearer <key>` | OpenAI 风格 |
+| `?key=<key>`(查询参数) | Gemini 官方 SDK 的 key 传递方式 ✅ |
 | `x-rp-preset: off\|light\|full\|ako` | 覆盖破限档位 |
 | `x-rp-nsfw: 0\|1` | 覆盖 NSFW 授权块开关 |
+| `x-rp-length: short\|medium\|long` | 覆盖输出长度档位 |
 | `x-character-id: <id>` | 指定角色卡 |
 | `x-target-model: <id>` | 指定上游模型(仅 OpenAI 端点嗅探路径) |
 
@@ -279,10 +282,13 @@ curl "http://127.0.0.1:8787/v1beta/models/gemini-2.5-flash:streamGenerateContent
 | `off` | 不注入 |
 
 档位选择优先级:`body.rp_preset` > 请求头 `x-rp-preset` > 环境变量 `RP_PRESET` > `ako`;
-NSFW 授权块开关:`body.rp_nsfw` > `x-rp-nsfw` > `RP_NSFW` > 开。
+NSFW 授权块开关:`body.rp_nsfw` > `x-rp-nsfw` > `RP_NSFW` > 开;
+输出长度档位:`body.rp_length` > `x-rp-length` > `RP_LENGTH` > `medium`(short 80-200 字 / medium 200-800 字 / long 800-2000 字)。
 
 > 所有预设均声明登场角色为虚构成年人(18+);这是硬底线,不随档位变化。
 > 抗拒绝纪律(禁道歉/禁说教/禁元评论/禁"没有做某事"式自证)在所有破限档位中生效。
+> `ako`/`full` 档会把角色卡数据槽位化进 `<bkgd_info>` 段(样本框架同款位置),
+> 并自动剥离重复注入的角色卡 system 文本,避免设定出现两份。
 
 ### 文件与图片上传
 
@@ -357,7 +363,9 @@ sakana-2api/
 | `TOOL_PROMPT` | `1` | `0` 时关闭自定义工具提示注入 |
 | `RP_PRESET` | `ako` | RP 破限预设默认档位(off/light/full/ako) |
 | `RP_NSFW` | `1` | RP 预设 NSFW 授权块开关(0 关闭) |
+| `RP_LENGTH` | `medium` | RP 输出长度档位(short/medium/long) |
 | `GEMINI_DEFAULT_MODEL` | `sakana-namazu-rp` | Gemini 端点模型名兜底映射 |
+| `DEBUG_PROMPT_LEN` | `500` | `DEBUG_PROMPT=1` 时打印的 prompt 前 N 字符 |
 | `SAKANA_BASE` | `https://chat.sakana.ai` | 上游地址(测试用) |
 
 **鉴权模式(三态):**
