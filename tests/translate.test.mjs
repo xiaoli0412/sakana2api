@@ -84,7 +84,7 @@ console.log('== 3. NDJSON -> OpenAI SSE chunks (thinking + stream + tool + final
   const tc = chunks.find(c => c.choices[0].delta.tool_calls);
   check('tool_call has name+arguments+id', tc && tc.choices[0].delta.tool_calls[0].function.name === 'run_python' && tc.choices[0].delta.tool_calls[0].function.arguments.includes('print(2+2)'));
   check('finalAnswer text appended', chunks.some(c => c.choices[0].delta.content === ' 4'));
-  check('finish_reason tool_calls or stop', chunks.at(-1).choices[0].finish_reason === 'tool_calls');
+  check('finish_reason tool_calls or stop', chunks.at(-2).choices[0].finish_reason === 'tool_calls');
 }
 
 console.log('== 4. web search toolResult shape (from real bundle) ==');
@@ -204,7 +204,7 @@ console.log('== 11. Citations extraction and source chips cleaning ==');
   check('citations extracted from chip', t.citations.some(c => c.title === 'Sakana AI 官网' && c.url === 'https://sakana.ai'));
   const content = chunks.map(c => c.choices[0]?.delta?.content || '').join('');
   check('source-chip tag stripped from content', !content.includes('<source-chip'), content);
-  check('final chunk contains citations array', chunks.at(-1).citations && chunks.at(-1).citations.length > 0);
+  check('final chunk contains citations array', chunks.at(-2).citations && chunks.at(-2).citations.length > 0);
 }
 
 console.log('== 12. Model JSON tool call auto-detection ==');
@@ -219,7 +219,7 @@ console.log('== 12. Model JSON tool call auto-detection ==');
   check('JSON tool call detected', !!tcChunk);
   check('JSON tool name parsed', tcChunk?.choices[0]?.delta?.tool_calls[0]?.function?.name === 'get_weather');
   check('JSON tool arguments parsed', tcChunk?.choices[0]?.delta?.tool_calls[0]?.function?.arguments.includes('Tokyo'));
-  check('finish reason is tool_calls', chunks.at(-1).choices[0].finish_reason === 'tool_calls');
+  check('finish reason is tool_calls', chunks.at(-2).choices[0].finish_reason === 'tool_calls');
 }
 
 console.log('== 13. Web search explicit parameter controls ==');
@@ -392,7 +392,7 @@ console.log('== 19. Parallel Tool Calls Detection (Array format) ==');
   check('both tool calls parsed', tcChunk?.choices[0]?.delta?.tool_calls?.length === 2);
   check('tool 1 is get_weather', tcChunk?.choices[0]?.delta?.tool_calls[0]?.function?.name === 'get_weather');
   check('tool 2 is get_stock', tcChunk?.choices[0]?.delta?.tool_calls[1]?.function?.name === 'get_stock');
-  check('finish reason is tool_calls', chunks.at(-1).choices[0].finish_reason === 'tool_calls');
+  check('finish reason is tool_calls', chunks.at(-2).choices[0].finish_reason === 'tool_calls');
 }
 
 console.log('== 20. Tagged <tool_call> and Anthropic/OpenAI Tool Formats ==');

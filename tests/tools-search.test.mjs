@@ -109,12 +109,40 @@ console.log('== 7. Anthropic 工具格式双向转换 ==');
   check('收尾 → message_delta(stop_reason=tool_use) + message_stop', finish.some(e => e.type === 'message_delta' && e.delta.stop_reason === 'tool_use') && finish.some(e => e.type === 'message_stop'), JSON.stringify(finish));
 }
 
-console.log('== 8. 流式 usage 收尾块 ==');
+console.log('== 8. 流式 usage 收尾块(独立 choices:[] chunk) ==');
 {
   const t = new NdjsonTranslator();
   t.line(JSON.stringify({ type: 'stream', token: '你好世界' }));
   const fin = t.finish();
-  check('finish 块带 usage', fin[0].usage && fin[0].usage.total_tokens > 0, JSON.stringify(fin));
+  check('finish 块带 finish_reason', fin[0].choices[0].finish_reason === 'stop', JSON.stringify(fin));
+  check('独立 usage chunk(choices 空数组)', fin.some(c => Array.isArray(c.choices) && c.choices.length === 0 && c.usage && c.usage.total_tokens > 0), JSON.stringify(fin));
+}
+
+console.log('== 9. 工具回合 JSON 候选抑制(声明 tools 时 content 不泄漏 JSON) ==');
+{
+  // 声明了工具:模型流式输出 {"tool":...} 时缓冲,不产生 content delta
+  const t = new NdjsonTranslator({ declaredTools: ['get_weather'] });
+  const out1 = t.line(JSON.stringify({ type: 'stream', token: '{"tool":"get_wea' }));
+  check('JSON 候选阶段不发 content', out1.length === 0, JSON.stringify(out1));
+  const out2 = t.line(JSON.stringify({ type: 'stream', token: 'ther","arguments":{"city":"北京"}}' }));
+  check('完整 JSON 仍不发 content', out2.length === 0, JSON.stringify(out2));
+  const out3 = t.line(JSON.stringify({ type: 'finalAnswer', text: '{"tool":"get_weather","arguments":{"city":"北京"}}' }));
+  check('finalAnswer 提取为 tool_calls', out3.some(c => c.choices[0].delta.tool_calls), JSON.stringify(out3));
+  const tc = out3.flatMap(c => c.choices[0].delta.tool_calls || [])[0];
+  check('tool_calls 参数完整', tc && tc.function.name === 'get_weather' && tc.function.arguments.includes('北京'), JSON.stringify(tc));
+
+  // 自然语言信号(换行)出现 → 判定不是 JSON,flush 缓冲正常发
+  const t2 = new NdjsonTranslator({ declaredTools: ['get_weather'] });
+  const a = t2.line(JSON.stringify({ type: 'stream', token: '{"tool":"get_weather",' }));
+  check('候选缓冲不发', a.length === 0);
+  const b = t2.line(JSON.stringify({ type: 'stream', token: '\n好的，这是完整回答' }));
+  const flushed = b.flatMap(c => c.choices[0].delta.content || []);
+  check('换行后 flush 缓冲为 content', flushed.join('').includes('好的'), JSON.stringify(flushed));
+
+  // 未声明工具(普通聊天):JSON 风格回答照常发出,不缓冲
+  const t3 = new NdjsonTranslator();
+  const c = t3.line(JSON.stringify({ type: 'stream', token: '{"answer":"直接回答"}' }));
+  check('无工具声明时不缓冲', c.some(x => (x.choices[0].delta.content || '').includes('直接回答')), JSON.stringify(c));
 }
 
 console.log(failures === 0 ? '\nALL TOOLS/SEARCH TESTS PASSED' : `\n${failures} FAILURES`);

@@ -959,7 +959,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && (p === '/v1/models' || p === '/models')) {
       return sendJson(res, 200, { object: 'list', data: MODELS });
     }
-    if (req.method === 'POST' && (p === '/v1/chat/completions' || p === '/v1/chat/completion')) {
+    if (req.method === 'POST' && (p === '/v1/chat/completions' || p === '/v1/chat/completion' || p === '/chat/completions')) {
       return await handleChatCompletions(req, res);
     }
     // Legacy completions: {model, prompt, max_tokens, stream, temperature}

@@ -212,11 +212,18 @@ for chunk in resp:
 - 声明 `tools` 后,代理把工具列表与调用协议注入提示词:模型在需要时只输出
   `{"tool":"名称","arguments":{...}}` 一个 JSON 对象,代理提取为标准的
   `tool_calls` delta(`id`/`type`/`name`/`arguments` 分片齐全),`finish_reason="tool_calls"`。
+- 工具回合的 JSON 调用文本**不会泄漏进 content**(代理缓冲识别,客户端只见干净的 tool_calls)。
+- 每个 chunk 的 `choices[].index` 与 `tool_calls[].index` 均为稳定整数(openai-python SDK
+  1.x/3.x 硬校验,缺 index 会导致工具参数静默丢失——AstrBot issue #6661);
+  `arguments` 分片按序拼接、最终为合法 JSON;流尾附带独立 usage chunk(`choices: []`)。
 - 框架执行工具后把结果作为 `role:"tool"` 消息回传(附 `tool_call_id`),代理将其
-  作为新输入交给模型继续(上游 `is_continue` 回合会忽略输入,工具结果走普通回合)。
+  作为新输入交给模型继续(上游 `is_continue` 回合会忽略输入,工具结果走普通回合);
+  多轮工具循环(工具→结果→再调用)完整支持。
 - 上游原生沙盒工具(`run_command`/`run_python`/`read_file`/`search` 等)对 API 客户端
   无意义:其 toolCall 事件被完全抑制,由服务端透明续轮,客户端只会看到最终正文。
 - 上游安全停止文本(日语)自动剥离,不污染输出。
+- `base_url` 配 `http://host:8787/v1`(SDK 直接拼接路径,不自动补 `/v1`);
+  裸路径 `/chat/completions`、`/models` 同样可用。
 
 ### `POST /v1/completions`(legacy)
 
