@@ -1,15 +1,16 @@
 {
   "name": "sakana-2api",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "description": "OpenAI-compatible reverse proxy for the free chat.sakana.ai web chat (streaming, thinking, tools, web search, multimodal).",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "harvest": "node scripts/harvest.mjs",
-    "test": "node tests/translate.test.mjs && node tests/gemini-rp.test.mjs",
+    "test": "node tests/translate.test.mjs && node tests/gemini-rp.test.mjs && node tests/tools-search.test.mjs",
     "test:translate": "node tests/translate.test.mjs",
-    "test:gemini": "node tests/gemini-rp.test.mjs"
+    "test:gemini": "node tests/gemini-rp.test.mjs",
+    "test:tools": "node tests/tools-search.test.mjs"
   },
   "engines": {
     "node": ">=22"

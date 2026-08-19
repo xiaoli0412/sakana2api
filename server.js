@@ -7,6 +7,7 @@ const path = require('path');
 const { randomUUID } = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { MODELS, openaiRequestToSakana, NdjsonTranslator, sse, clean, stripChips, extractFileContent } = require('./lib/translate');
+const { anthropicToChat, chatToAnthropicNonStream, AnthropicStreamer } = require('./lib/anthropic');
 const { SakanaUpstream, UpstreamError } = require('./lib/upstream');
 const { getSession, loadSession } = require('./lib/session');
 const { autoSession } = require('./lib/auto-session');
@@ -176,6 +177,12 @@ async function* drainRoundToSSE(resp, translator, base) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+  const toData = (c) => {
+    const data = { ...base, choices: c.choices };
+    if (c.usage) data.usage = c.usage;
+    if (c.citations && c.citations.length) data.citations = c.citations;
+    return data;
+  };
   for (;;) {
     const { value, done } = await reader.read();
     if (done) { buf += decoder.decode(); break; }
@@ -184,12 +191,12 @@ async function* drainRoundToSSE(resp, translator, base) {
     for (const line of lines) {
       if (!line.trim()) continue;
       for (const c of translator.line(line)) {
-        yield { event: 'chat.completion.chunk', data: { ...base, choices: c.choices } };
+        yield { event: 'chat.completion.chunk', data: toData(c) };
       }
     }
   }
   if (buf.trim()) {
-    for (const c of translator.line(buf)) yield { event: 'chat.completion.chunk', data: { ...base, choices: c.choices } };
+    for (const c of translator.line(buf)) yield { event: 'chat.completion.chunk', data: toData(c) };
   }
 }
 
@@ -236,7 +243,7 @@ async function continueNativeToolRound(conversationId, sakanaReq) {
   const leaf = await upstream.getLastMessageId(conversationId);
   const contReq = { ...sakanaReq, isContinue: true, prompt: undefined, files: [] };
   const resp = await upstream.streamGenerate(conversationId, contReq, { lastMessageId: leaf });
-  return { ...(await drainUpstreamRound(resp, new NdjsonTranslator())), leaf };
+  return { ...(await drainUpstreamRound(resp, new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames }))), leaf };
 }
 
 // High-Affinity Conversation Context & Stickiness Manager
@@ -480,7 +487,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       let text = '';
       let reasoning = '';
       const toolCalls = [];
-      const first = await drainUpstreamRound(upResp, new NdjsonTranslator());
+      const first = await drainUpstreamRound(upResp, new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames }));
       text += first.content;
       reasoning += first.reasoning;
       toolCalls.push(...first.toolCalls);
@@ -540,7 +547,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     // streaming
     res.setHeader('x-conversation-id', conversationId || '');
     sseHeaders(res);
-    const t = new NdjsonTranslator();
+    const t = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
     let streamedChars = 0;
     const base = { id: t.assistantMessageId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: modelName };
     let streamError = null;
@@ -558,7 +565,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       while (!t.sentContent && !t.clientToolRound && !streamError && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
         rounds++;
         try {
-          const contT = new NdjsonTranslator();
+          const contT = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
           const leaf = await upstream.getLastMessageId(conversationId);
           const contReq = { ...sakanaReq, isContinue: true, prompt: undefined, files: [] };
           const contResp = await upstream.streamGenerate(conversationId, contReq, { lastMessageId: leaf });
@@ -581,6 +588,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
         for (const c of t.finish()) {
           const chunkData = { ...base, choices: c.choices };
           if (c.citations && c.citations.length) chunkData.citations = c.citations;
+          if (c.usage) chunkData.usage = c.usage;
           res.write(sse('chat.completion.chunk', chunkData));
         }
       }
@@ -698,44 +706,47 @@ async function handleResponses(req, res) {
   });
 }
 
-/** Anthropic Messages API (basic): {model, system, messages, max_tokens, stream} */
+/** Anthropic Messages API: {model, system, messages, tools, tool_choice, max_tokens, stream} */
 async function handleAnthropicMessages(req, res) {
   let body;
   try { body = JSON.parse((await readBody(req)).toString('utf8')); }
   catch { return sendJson(res, 400, { error: { message: 'invalid JSON', type: 'invalid_request_error' } }); }
-  const chatBody = {
-    ...body,
-    messages: [
-      ...(body.system ? [{ role: 'system', content: Array.isArray(body.system) ? body.system.map(s => s.text || s).join('\n') : String(body.system) }] : []),
-      ...(Array.isArray(body.messages) ? body.messages : [{ role: 'user', content: String(body.messages ?? '') }]),
-    ],
-  };
-  delete chatBody.system;
+  const chatBody = anthropicToChat(body);
+  // 与 chat 端点同源的扩展字段(rp / character card / 会话续传)
+  for (const k of ['rp_preset', 'rpPreset', 'rp_nsfw', 'rpNsfw', 'rp_length', 'rpLength', 'character_id', 'message_id', 'conversation_id']) {
+    if (body[k] !== undefined) chatBody[k] = body[k];
+  }
   const stream = body.stream === true;
+  chatBody.stream = stream;
   const reader = await makeChatResponse(chatBody);
   if (stream) {
     sseHeaders(res);
+    const streamer = new AnthropicStreamer({ model: chatBody.model || 'sakana-namazu' });
+    res.write(`data: ${JSON.stringify(streamer.start())}\n\n`);
     for await (const c of reader) {
       if (c.event === 'chat.completion.chunk') {
-        const d = c.data?.choices?.[0]?.delta?.content;
-        if (d) res.write(`data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: d } })}\n\n`);
-        if (c.data?.choices?.[0]?.finish_reason) {
-          res.write(`data: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: {} })}\n\n`);
-          res.write(`data: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
-        }
+        for (const ev of streamer.push(c.data)) res.write(`data: ${JSON.stringify(ev)}\n\n`);
+      }
+    }
+    // 上游提前终止时补合规收尾事件
+    if (!streamer.stopped) {
+      for (const ev of streamer.push({ choices: [{ index: 0, delta: {}, finish_reason: 'end_turn' }] })) {
+        res.write(`data: ${JSON.stringify(ev)}\n\n`);
       }
     }
     return res.end('data: [DONE]\n\n');
   }
-  return sendJson(res, 200, {
-    id: 'msg_' + randomUUID().replace(/-/g, '').slice(0, 12),
-    type: 'message',
-    role: 'assistant',
+  const toolCalls = reader.toolCalls || [];
+  const finishReason = reader.finishReason || (!reader.content && toolCalls.length ? 'tool_calls' : 'stop');
+  return sendJson(res, 200, chatToAnthropicNonStream({
     model: chatBody.model || 'sakana-namazu',
-    content: reader.content ? [{ type: 'text', text: reader.content }] : [],
-    stop_reason: 'end_turn',
-    usage: { input_tokens: reader.promptTokens || 0, output_tokens: reader.completionTokens || 0 },
-  });
+    usage: { prompt_tokens: reader.promptTokens || 0, completion_tokens: reader.completionTokens || 0 },
+    choices: [{
+      index: 0,
+      message: { role: 'assistant', content: reader.content || '', tool_calls: toolCalls.length ? toolCalls : undefined },
+      finish_reason: finishReason,
+    }],
+  }));
 }
 
 /**
@@ -842,7 +853,7 @@ async function makeChatResponseInner(chatBody) {
   }
 
   const upResp = await upstream.streamGenerate(conversationId, sakanaReq, { lastMessageId });
-  const t = new NdjsonTranslator();
+  const t = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
 
   if (streaming) {
     // Return SSE chunk generator, mirroring chat path but as async iterable.
@@ -855,7 +866,7 @@ async function makeChatResponseInner(chatBody) {
         let rounds = 0;
         while (!t.sentContent && !t.clientToolRound && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
           rounds++;
-          const contT = new NdjsonTranslator();
+          const contT = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
           const leaf = await upstream.getLastMessageId(conversationId);
           const contReq = { ...sakanaReq, isContinue: true, prompt: undefined, files: [] };
           const contResp = await upstream.streamGenerate(conversationId, contReq, { lastMessageId: leaf });
@@ -868,7 +879,12 @@ async function makeChatResponseInner(chatBody) {
           const fb = { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'error' }], error: { message: 'empty upstream response', code: 'EMPTY-RESPONSE' } };
           yield { event: 'chat.completion.chunk', data: fb };
         }
-        for (const c of t.finish()) yield { event: 'chat.completion.chunk', data: { ...base, choices: c.choices } };
+        for (const c of t.finish()) {
+          const data = { ...base, choices: c.choices };
+          if (c.usage) data.usage = c.usage;
+          if (c.citations && c.citations.length) data.citations = c.citations;
+          yield { event: 'chat.completion.chunk', data };
+        }
       } catch (e) {
         const fb = { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'error' }], error: { message: String(e.message || e), code: 'STREAM-ERROR' } };
         yield { event: 'chat.completion.chunk', data: fb };
@@ -880,7 +896,7 @@ async function makeChatResponseInner(chatBody) {
   }
 
   // non-stream: accumulate
-  const first = await drainUpstreamRound(upResp, new NdjsonTranslator());
+  const first = await drainUpstreamRound(upResp, new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames }));
   let text = first.content;
   let reasoning = first.reasoning;
   let finalT = first.t;
@@ -909,7 +925,10 @@ async function makeChatResponseInner(chatBody) {
   stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: null });
   saveContext(firstUserText(body) || lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
   const entry = auditEntry({ method: 'POST', url: '/v1/responses', headers: {} }, body, 200, { content: text.slice(0, 200) }, null, Date.now() - start);
-  return { content: text, reasoning, conversationId, promptTokens, completionTokens };
+  // 客户端工具调用(JSON 提取,原生沙盒调用已被抑制)随聚合返回,供
+  // Anthropic 端点组装 tool_use 块
+  const toolCalls = first.toolCalls;
+  return { content: text, reasoning, conversationId, promptTokens, completionTokens, toolCalls, finishReason: toolCalls.length && !text ? 'tool_calls' : 'stop' };
 }
 
 const server = http.createServer(async (req, res) => {

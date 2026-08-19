@@ -19,22 +19,22 @@ console.log('== 1. OpenAI request -> Sakana bootstrap ==');
   check('toneMode=polite->jp-vibes', r.toneMode === 'jp-vibes', r.toneMode);
   check('prompt="你好"', r.prompt === '你好', r.prompt);
   check('model=sakana-namazu', r.sakanaModel === 'sakana-namazu', r.sakanaModel);
-  check('default search=true (raw parse)', parseModel('sakana-namazu').webSearchEnabled === true);
-  check('guard: think innate degrades search in final request', r.webSearchEnabled === false && r.enableThinking === true);
+  check('default search=false (raw parse)', parseModel('sakana-namazu').webSearchEnabled === false);
+  check('default mode: thinking on, search off', r.webSearchEnabled === false && r.enableThinking === true);
 }
 
 console.log('== 1b. hyphen model matrix parsing ==');
 {
   const cases = [
-    ['sakana-namazu', { m: 'sakana-namazu', tone: 'default', search: true, think: true, rp: false }],
-    ['sakana-namazu-polite', { m: 'sakana-namazu', tone: 'jp-vibes', search: true, think: true, rp: false }],
+    ['sakana-namazu', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-namazu-polite', { m: 'sakana-namazu', tone: 'jp-vibes', search: false, think: true, rp: false }],
     ['sakana-namazu-search', { m: 'sakana-namazu', tone: 'default', search: true, think: true, rp: false }],
-    ['sakana-namazu-osaka', { m: 'sakana-namazu', tone: 'osaka', search: true, think: true, rp: false }],
+    ['sakana-namazu-osaka', { m: 'sakana-namazu', tone: 'osaka', search: false, think: true, rp: false }],
     ['sakana-namazu-nosearch', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
-    ['sakana-fugu', { m: 'fugu', tone: 'default', search: true, think: true, rp: false }],
+    ['sakana-fugu', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
     ['sakana-fugu-polite-search', { m: 'fugu', tone: 'jp-vibes', search: true, think: true, rp: false }],
-    ['sakana-fugu-osaka', { m: 'fugu', tone: 'osaka', search: true, think: true, rp: false }],
-    ['sakana-namazu-rp', { m: 'sakana-namazu', tone: 'default', search: true, think: true, rp: true }],
+    ['sakana-fugu-osaka', { m: 'fugu', tone: 'osaka', search: false, think: true, rp: false }],
+    ['sakana-namazu-rp', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: true }],
   ];
   for (const [model, want] of cases) {
     const r = parseModel(model);
@@ -66,7 +66,7 @@ console.log('== 2. multimodal image data url -> files ==');
 
 console.log('== 3. NDJSON -> OpenAI SSE chunks (thinking + stream + tool + final) ==');
 {
-  const t = new NdjsonTranslator();
+  const t = new NdjsonTranslator({ declaredTools: ['run_python'] });
   const chunks = [];
   const lines = [
     { type: 'reasoning', token: '用户想要说' },
@@ -127,7 +127,7 @@ console.log('== 6. tool-role message round-trip (external framework) ==');
     ],
   });
   check('tool turn detected', r.isToolTurn === true);
-  check('tool turn isContinue', r.isContinue === true);
+  check('tool turn is fresh input (not is_continue)', r.isContinue === false);
   check('tool result embedded in prompt', /晴/.test(r.prompt) && /get_weather/.test(r.prompt), r.prompt.slice(0, 120));
   check('original user text kept', /北京天气/.test(r.prompt), r.prompt.slice(0, 120));
 }
@@ -233,16 +233,16 @@ console.log('== 13. Web search explicit parameter controls ==');
   check('web_search: true + enable_thinking:false enables search', enabled.webSearchEnabled === true && enabled.enableThinking === false);
 }
 
-console.log('== 13b. INPUT-MODE-001 guard: thinking wins, search degrades (verified by real-browser capture 2026-08-17) ==');
+console.log('== 13b. INPUT-MODE-001 硬约束:思考与搜索互斥,搜索优先(实测上游 400) ==');
 {
-  // The upstream rejects both-true with INPUT-MODE-001. Thinking is innate,
-  // so when both are requested the search flag is silently degraded.
+  // 上游在 enableThinking 与 webSearchEnabled 同时为 true 时返回 400。
+  // 语义为显式模式切换:搜索请求强制关闭思考,搜索过程由代理合成进
+  // reasoning_content(客户端思维链可见"正在搜索/搜索来源")。
   const both = openaiRequestToSakana({ model: 'sakana-namazu', web_search: true, enable_thinking: true, messages: [{ role: 'user', content: 'test' }] });
-  check('both on -> thinking stays on', both.enableThinking === true);
-  check('both on -> search degraded off', both.webSearchEnabled === false);
+  check('both on -> search mode wins (thinking forced off)', both.enableThinking === false && both.webSearchEnabled === true);
 
   const bothViaModel = openaiRequestToSakana({ model: 'sakana-namazu-search', enable_thinking: true, messages: [{ role: 'user', content: 'test' }] });
-  check('model search suffix + thinking -> search degraded off', bothViaModel.webSearchEnabled === false && bothViaModel.enableThinking === true);
+  check('model search suffix + thinking -> search mode wins', bothViaModel.webSearchEnabled === true && bothViaModel.enableThinking === false);
 
   const thinkOnly = openaiRequestToSakana({ model: 'sakana-namazu', web_search: false, enable_thinking: true, messages: [{ role: 'user', content: 'test' }] });
   check('thinking alone stays on', thinkOnly.enableThinking === true && thinkOnly.webSearchEnabled === false);
@@ -434,7 +434,7 @@ console.log('== 22. Tool Round-Trip Execution Context Injection ==');
     ],
   });
   check('tool result recognized', r.isToolTurn === true);
-  check('isContinue is true for tool continuation', r.isContinue === true);
+  check('isContinue stays false (tool result is a fresh input, upstream ignores inputs on is_continue)', r.isContinue === false);
   check('tool result injected into continuation prompt', r.prompt.includes('Sunny') && r.prompt.includes('get_weather'));
 }
 

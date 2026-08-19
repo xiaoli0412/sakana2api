@@ -159,20 +159,22 @@ for chunk in resp:
 
 | 模型 ID | 说明 |
 |---------|------|
-| `sakana-namazu` | Namazu · Standard 🐟 · 默认(思考+搜索) |
-| `sakana-namazu-search` | Namazu · Standard 🐟 · 显式搜索 |
-| `sakana-namazu-polite` | Namazu · Polite 🐠 · 默认 |
-| `sakana-namazu-polite-search` | Namazu · Polite 🐠 · 显式搜索 |
-| `sakana-namazu-osaka` | Namazu · Osaka 🐙 · 默认 |
-| `sakana-namazu-osaka-search` | Namazu · Osaka 🐙 · 显式搜索 |
+| `sakana-namazu` | Namazu · Standard 🐟 · 默认(思考模式) |
+| `sakana-namazu-search` | Namazu · Standard 🐟 · 显式搜索模式 |
+| `sakana-namazu-polite` | Namazu · Polite 🐠 · 默认(思考模式) |
+| `sakana-namazu-polite-search` | Namazu · Polite 🐠 · 显式搜索模式 |
+| `sakana-namazu-osaka` | Namazu · Osaka 🐙 · 默认(思考模式) |
+| `sakana-namazu-osaka-search` | Namazu · Osaka 🐙 · 显式搜索模式 |
 | `sakana-fugu` … | Fugu · 同上 6 种组合 |
 | `sakana-namazu-rp` | 🎭 RP 角色扮演(默认风格,完全破限) |
 | `sakana-fugu-rp` | 🎭 RP 角色扮演(Fugu 上游,完全破限) |
 | `sakana-namazu-polite-rp` | 🎭 RP 角色扮演(礼貌风格,完全破限) |
 | `sakana-namazu-osaka-rp` | 🎭 RP 角色扮演(大阪风格,完全破限) |
 
-> 思考链是模型**天生自带**的(任何对话都会产生 reasoning_content),无需单独开关;
-> 后缀仅控制是否显式启用 Web 搜索。旧冒号格式(`sakana-namazu:polite`)仍兼容。
+> 思考链是模型**天生自带**的(任何对话都会产生 reasoning_content),无需单独开关。
+> 思考与搜索在上游互斥(INPUT-MODE-001,两者同开会 400):`-search` 后缀显式
+> 切换为搜索模式(关闭思考,代理把搜索过程与来源合成进 reasoning_content,
+> 客户端在思维链里能看到"正在搜索 / 搜索结果")。旧冒号格式(`sakana-namazu:polite`)仍兼容。
 > `-rp` 后缀模型自动注入完全破限预设(Ako 写作测试框架,见下文),
 > 与角色卡叠加使用:角色卡定人设,RP 预设定扮演规则与破限授权。
 
@@ -192,7 +194,7 @@ for chunk in resp:
 
 | 参数 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `web_search` | bool | `true` | 是否启用 Web 搜索 |
+| `web_search` | bool | `false` | 是否启用 Web 搜索(开启后自动切搜索模式,思考关闭) |
 | `style` | string | `"default"` | 覆盖风格: `standard`, `polite`, `osaka` |
 
 **响应增强字段:**
@@ -200,9 +202,21 @@ for chunk in resp:
 | 字段 | 出现位置 | 格式 |
 |------|----------|------|
 | `conversation_id` | 非流式 JSON / `x-conversation-id` 响应头 | string |
-| `reasoning_content` | SSE delta / 非流式 message | string |
+| `reasoning_content` | SSE delta / 非流式 message | string(含搜索过程与来源) |
 | `tool_calls` | SSE delta | `[{id, type, function:{name, arguments}}]` |
 | `citations` | 最后一个 SSE chunk | `[{title, url}]` |
+| `usage` | 最后一个 SSE chunk | `{prompt_tokens, completion_tokens, total_tokens}` |
+
+**工具调用(OpenCode / Astrbot 等框架):**
+
+- 声明 `tools` 后,代理把工具列表与调用协议注入提示词:模型在需要时只输出
+  `{"tool":"名称","arguments":{...}}` 一个 JSON 对象,代理提取为标准的
+  `tool_calls` delta(`id`/`type`/`name`/`arguments` 分片齐全),`finish_reason="tool_calls"`。
+- 框架执行工具后把结果作为 `role:"tool"` 消息回传(附 `tool_call_id`),代理将其
+  作为新输入交给模型继续(上游 `is_continue` 回合会忽略输入,工具结果走普通回合)。
+- 上游原生沙盒工具(`run_command`/`run_python`/`read_file`/`search` 等)对 API 客户端
+  无意义:其 toolCall 事件被完全抑制,由服务端透明续轮,客户端只会看到最终正文。
+- 上游安全停止文本(日语)自动剥离,不污染输出。
 
 ### `POST /v1/completions`(legacy)
 
@@ -218,7 +232,10 @@ OpenAI Responses 格式:`{ model, input|instructions|tools, stream }`
 ### `POST /v1/messages`(Anthropic 兼容)
 
 Anthropic Messages 格式:`{ model, system, messages, max_tokens, stream }`
-返回 `{ type:"message", content:[{type:"text",…}] }`。
+完整支持 `tools`(input_schema)与 `tool_choice`;`tool_use`/`tool_result` 块
+双向转换;流式返回完整事件序列
+(`message_start` → `content_block_start` → `text_delta`/`input_json_delta` →
+`content_block_stop` → `message_delta` → `message_stop`),Claude Code 类客户端可直接使用。
 
 ### 🌌 Gemini 兼容端点(酒馆/RisuAI 直连)
 
