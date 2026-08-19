@@ -51,7 +51,6 @@ const upstream = new SakanaUpstream(() => {
   if (acct) return acct;
   return getSession();
 });
-
 // built-in web UI (read per-request so edits apply live)
 const UI_HTML_PATH = path.join(__dirname, 'public', 'index.html');
 
@@ -370,7 +369,7 @@ async function handleChatBody(req, res, body, start = Date.now()) {
     return sendJson(res, 429, { error: { message: 'Server busy: ' + err.message, type: 'rate_limit_error', code: 'SERVER-BUSY' } });
   }
 
-  const RETRYABLE = /CONV-NOTFOUND-001|RATE-LIMIT-001|AUTH-LOGIN-001|CF-403|UPSTREAM-TIMEOUT/;
+  const RETRYABLE = /CONV-NOTFOUND-001|RATE-LIMIT-001|RATE-MODEL|AUTH-LOGIN-001|CF-403|UPSTREAM-TIMEOUT/;
   try {
     for (let attempt = 0; ; attempt++) {
       // 1. Check conversation context affinity
@@ -388,11 +387,11 @@ async function handleChatBody(req, res, body, start = Date.now()) {
       }
 
       if (!boundAccount) {
-        const acct = accountPool.next();
+        const acct = accountPool.next(body.model || 'sakana-namazu');
         boundAccount = acct || await getSession().catch(() => null);
       }
 
-      if (boundAccount && boundAccount.id) accountPool.acquire(boundAccount.id);
+      if (boundAccount && boundAccount.id) accountPool.acquire(boundAccount.id, body.model || 'sakana-namazu');
       try {
         const result = await als.run({ session: boundAccount, ctxEntry }, () => handleChatInner(req, res, body, start, ctxEntry));
         if (boundAccount && boundAccount.id) accountPool.release(boundAccount.id, true);
@@ -400,9 +399,14 @@ async function handleChatBody(req, res, body, start = Date.now()) {
       } catch (e) {
         if (boundAccount && boundAccount.id) accountPool.release(boundAccount.id, false);
         const code = (e && (e.errorCode || e.code)) || '';
-        if (attempt === 0 && !res.headersSent && (!code || RETRYABLE.test(String(code) + ' ' + String(e.message)))) {
-          // Rotate the account and retry once (account pool分流/容错/热迁移).
-          if (boundAccount && boundAccount.id) accountPool.markRateLimited(boundAccount.id);
+        // RATE-MODEL-* = per-model quota window on the upstream (free tier):
+        // the account itself is healthy, so rotate to a different account and
+        // retry without cooling the account down. Other retryable codes cool
+        // the account so the pool stops selecting it.
+        const modelQuota = code.startsWith('RATE-MODEL');
+        const maxRetries = modelQuota ? 2 : 1;
+        if (attempt < maxRetries && !res.headersSent && (!code || RETRYABLE.test(String(code) + ' ' + String(e.message)))) {
+          if (boundAccount && boundAccount.id && !modelQuota) accountPool.markRateLimited(boundAccount.id);
           console.log(`[chat] migrating/retrying conversation with fresh account (${code || e.message})`);
           continue;
         }
@@ -755,13 +759,14 @@ async function handleAnthropicMessages(req, res) {
  */
 async function makeChatResponse(chatBody) {
   // bind one account to the whole multi-call flow; retry once on account-level errors
-  const RETRYABLE = /CONV-NOTFOUND-001|RATE-LIMIT-001|AUTH-LOGIN-001|CF-403|UPSTREAM-TIMEOUT/;
+  const RETRYABLE = /CONV-NOTFOUND-001|RATE-LIMIT-001|RATE-MODEL|AUTH-LOGIN-001|CF-403|UPSTREAM-TIMEOUT/;
   // Also pin the account for auto-context continuations (same rule as chat handler).
   const ctxEntry = firstUserText(chatBody) ? lookupContext(firstUserText(chatBody)) : null;
   for (let attempt = 0; ; attempt++) {
     let bound = null;
     if (ctxEntry && ctxEntry.accountId) bound = accountPool.get(ctxEntry.accountId);
-    if (!bound) bound = await accountPool.next() || await getSession().catch(() => null);
+    if (!bound) bound = await accountPool.next(chatBody.model || 'sakana-namazu') || await getSession().catch(() => null);
+    if (bound && bound.id) accountPool.acquire(bound.id, chatBody.model || 'sakana-namazu');
     try {
       // Character card injection for responses / anthropic paths
       try {
@@ -769,11 +774,18 @@ async function makeChatResponse(chatBody) {
         const card = charId ? loadCard(CARD_DIR, charId) : activeCharacter;
         if (card && card.name && chatBody.messages) chatBody.messages = injectCharacterCard(chatBody.messages, card);
       } catch (e) { console.log('[character-card] inject error (makeChatResponse):', String(e.message || e).slice(0, 120)); }
-      return await als.run({ session: bound, ctxEntry }, () => makeChatResponseInner(chatBody));
+      const result = await als.run({ session: bound, ctxEntry }, () => makeChatResponseInner(chatBody));
+      if (bound && bound.id) accountPool.release(bound.id, true);
+      return result;
     } catch (e) {
+      if (bound && bound.id) accountPool.release(bound.id, false);
       const code = (e && (e.errorCode || e.code)) || '';
-      if (attempt === 0 && (!code || RETRYABLE.test(String(code) + ' ' + String(e.message)))) {
-        if (bound && bound.id) accountPool.markRateLimited(bound.id);
+      // RATE-MODEL-*: per-model quota window — rotate accounts without cooling
+      // the healthy account down (same rule as the chat path).
+      const modelQuota = code.startsWith('RATE-MODEL');
+      const maxRetries = modelQuota ? 2 : 1;
+      if (attempt < maxRetries && (!code || RETRYABLE.test(String(code) + ' ' + String(e.message)))) {
+        if (bound && bound.id && !modelQuota) accountPool.markRateLimited(bound.id);
         console.log('[makeChatResponse] retrying with fresh account (' + (code || e.message) + ')');
         continue;
       }

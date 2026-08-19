@@ -149,4 +149,40 @@ await (async () => {
 })();
 
 console.log(failures ? `\nRESULT: ${failures} FAILED` : '\nRESULT: all passed');
+
+console.log('== Model-aware rotation (RATE-MODEL quota spread) ==');
+{
+  const file = path.join(os.tmpdir(), 'pool-model-' + Date.now() + '.json');
+  const p = new AccountPool(file, path.join(os.tmpdir(), 'sess-model.json'), { minPool: 3, maxPool: 3 });
+  for (let i = 1; i <= 3; i++) {
+    p.add({ email: `m${i}@x.com`, uid: `u${i}`, cookieHeader: `sakana-chat=m${i}` });
+  }
+  const first = p.next('sakana-namazu-search');
+  const second = p.next('sakana-namazu-search');
+  const third = p.next('sakana-namazu-search');
+  const ids = [first.id, second.id, third.id];
+  check('model rotation covers all accounts before reusing', new Set(ids).size === 3, ids.join(','));
+  const again = p.next('sakana-namazu-search');
+  check('after all used, rotates back', ids.includes(again.id));
+  p.acquire(ids[0], 'sakana-namazu-search');
+  const other = p.next('sakana-fugu');
+  check('different model still returns an account', !!other.id);
+}
+
 process.exit(failures ? 1 : 0);
+console.log('== Model-aware rotation (RATE-MODEL quota spread) ==');
+{
+  const os = require('os');
+  const path = require('path');
+  const dir = os.tmpdir();
+  const file = path.join(dir, 'pool-model-' + Date.now() + '.json');
+  const { AccountPool } = require('../lib/account-pool.js');
+  const p = new AccountPool(file, path.join(dir, 'sess-model.json'), { minPool: 3, maxPool: 3 });
+  for (let i = 1; i <= 3; i++) {
+    p.add({ email: `m${i}@x.com`, uid: `u${i}`, cookieHeader: `sakana-chat=m${i}` });
+  }
+  const first = p.next('sakana-namazu-search');
+  const second = p.next('sakana-namazu-search');
+  const third = p.next('sakana-namazu-search');
+  const ids = [first.id, second.id, third.id];
+}
