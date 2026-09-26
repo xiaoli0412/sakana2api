@@ -1,0 +1,36 @@
+services:
+  sakana-2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sakana-2api:0.12.2
+    container_name: sakana-2api
+    restart: unless-stopped
+    init: true
+    mem_limit: ${MEMORY_LIMIT:-2g}
+    memswap_limit: ${MEMORY_SWAP_LIMIT:-2g}
+    ports:
+      - "8787:8787"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      AUTO_SESSION: "true"
+      API_KEY: ${API_KEY:?set API_KEY in .env}
+      ACCOUNT_POOL_MIN: ${ACCOUNT_POOL_MIN:-50}
+      ACCOUNT_POOL_MAX: ${ACCOUNT_POOL_MAX:-50}
+      ACCOUNT_POOL_CRITICAL: ${ACCOUNT_POOL_CRITICAL:-10}
+      HARVEST_BACKOFF_MS: ${HARVEST_BACKOFF_MS:-300000}
+      DISPLAY: :99
+    volumes:
+      - ./session.json:/app/session.json
+      - ./account_pool.json:/app/account_pool.json
+      - ./keys.json:/app/keys.json
+      - ./tempmail.json:/app/tempmail.json
+      - ./character_cards:/app/character_cards
+      - ./.browser-profile:/app/.browser-profile
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s

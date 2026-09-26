@@ -83,6 +83,18 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
+function memorySnapshot() {
+  const mem = process.memoryUsage();
+  const mib = (value) => Math.round(value / 1048576);
+  return {
+    rssMB: mib(mem.rss),
+    heapUsedMB: mib(mem.heapUsed),
+    heapTotalMB: mib(mem.heapTotal),
+    externalMB: mib(mem.external),
+    arrayBuffersMB: mib(mem.arrayBuffers),
+  };
+}
+
 function readBody(req, limit = 32 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -953,7 +965,9 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' });
       return res.end(fs.readFileSync(UI_HTML_PATH, 'utf8'));
     }
-    if (req.method === 'GET' && p === '/health') return sendJson(res, 200, { ok: true });
+    if (req.method === 'GET' && p === '/health') {
+      return sendJson(res, 200, { ok: true, uptimeSec: Math.floor(process.uptime()), memory: memorySnapshot() });
+    }
 
     // Character card avatars are public PNGs: <img> tags cannot send
     // authorization headers, so let them through the auth gate (the upstream
@@ -1056,6 +1070,7 @@ const server = http.createServer(async (req, res) => {
         contextCount: contextStore.size,
         uptimeSec: Math.floor((Date.now() - stats.startedAt) / 1000),
         mem: { rssMB: Math.round(mem.rss / 1048576), heapMB: Math.round(mem.heapUsed / 1048576), heapMaxMB: Math.round(mem.heapTotal / 1048576) },
+        browser: autoSession.status(),
         node: process.version,
         authMode: (API_KEY || keyStore.keys.some(k => !k.revoked)) ? 'keyed' : 'open',
       };
