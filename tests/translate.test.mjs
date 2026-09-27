@@ -1,6 +1,6 @@
 // Offline test: feed a realistic Sakana NDJSON stream (based on the protocol)
 // into the translator and verify the OpenAI SSE chunks it produces.
-import { openaiRequestToSakana, NdjsonTranslator, sniffMimeType, parseModel, MODELS } from '../lib/translate.js';
+import { openaiRequestToSakana, NdjsonTranslator, sniffMimeType, parseModel, MODELS, RP_MODEL_ERROR_CODE, normalizedMessagesToPrompt } from '../lib/translate.js';
 import { AccountPool } from '../lib/account-pool.js';
 import { ConcurrencyManager } from '../lib/concurrency.js';
 
@@ -34,16 +34,40 @@ console.log('== 1b. hyphen model matrix parsing ==');
     ['sakana-fugu', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
     ['sakana-fugu-polite-search', { m: 'fugu', tone: 'jp-vibes', search: true, think: true, rp: false }],
     ['sakana-fugu-osaka', { m: 'fugu', tone: 'osaka', search: false, think: true, rp: false }],
-    ['sakana-namazu-rp', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: true }],
   ];
   for (const [model, want] of cases) {
     const r = parseModel(model);
     const got = { m: r.sakanaModel, tone: r.toneMode, search: r.webSearchEnabled, think: r.enableThinking, rp: r.isRP };
     check(`parse ${model}`, JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got));
   }
-  const rp = MODELS.find(m => m.id === 'sakana-namazu-rp');
-  check('RP model listed in /v1/models', !!rp && rp.rp === true && rp.apiModel === 'sakana-namazu', rp && rp.id);
-  check('total models = 16', MODELS.length === 16, String(MODELS.length));
+  check('RP models removed from /v1/models', !MODELS.some((m) => m.id.includes('-rp')));
+  check('total models = 12', MODELS.length === 12, String(MODELS.length));
+  for (const model of ['sakana-namazu-rp', 'sakana-fugu-rp', 'sakana-namazu:rp']) {
+    try {
+      parseModel(model);
+      check(`parse ${model} rejects`, false, 'did not throw');
+    } catch (error) {
+      check(`parse ${model} rejects`, error.code === RP_MODEL_ERROR_CODE && error.errorCode === RP_MODEL_ERROR_CODE, `${error.code}/${error.errorCode}`);
+    }
+  }
+  try {
+    openaiRequestToSakana({ model: 'sakana-namazu-rp', messages: [{ role: 'user', content: '嗨' }] });
+    check('OpenAI RP request rejects', false, 'did not throw');
+  } catch (error) {
+    check('OpenAI RP request rejects', error.code === RP_MODEL_ERROR_CODE && error.status === 400, `${error.code}/${error.status}`);
+  }
+}
+
+console.log('== 1c. normalized message prompt helper ==');
+{
+  const prompt = normalizedMessagesToPrompt([
+    { role: 'system', parts: [{ kind: 'text', text: '设定' }] },
+    { role: 'user', parts: [{ kind: 'text', text: '你好' }, { kind: 'attachment', attachment: { name: 'context.txt' } }] },
+    { role: 'tool', parts: [{ kind: 'tool_result', id: 'weather', content: { temp: 20 } }] },
+  ]);
+  check('normalized prompt keeps roles and text', prompt.includes('[系统]\n设定') && prompt.includes('[用户]\n你好'), prompt);
+  check('normalized prompt keeps attachment marker', prompt.includes('[附件: context.txt]'), prompt);
+  check('normalized prompt keeps tool result', prompt.includes('[工具结果 (weather)]') && prompt.includes('20'), prompt);
 }
 
 console.log('== 2. multimodal image data url -> files ==');
@@ -269,8 +293,12 @@ console.log('== 13c. system prompt and RP injection ==');
   ] });
   check('multiple system prompts keep order', multi.prompt.startsWith('A\n\nB\n\nC'), multi.prompt.slice(0, 40));
 
-  const rp = openaiRequestToSakana({ model: 'sakana-namazu-rp', messages: [{ role: 'user', content: '嗨' }] });
-  check('rp model flagged', rp.isRP === true);
+  try {
+    openaiRequestToSakana({ model: 'sakana-namazu-rp', messages: [{ role: 'user', content: '嗨' }] });
+    check('RP model request rejects before prompt build', false, 'did not throw');
+  } catch (error) {
+    check('RP model request rejects before prompt build', error.code === RP_MODEL_ERROR_CODE);
+  }
 }
 
 console.log('== 14. Least-InFlight load balancing & account pool ==');

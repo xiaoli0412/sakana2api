@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sakana-2api:0.12.2
+    image: sakana-2api:0.13.0
     container_name: sakana-2api
     restart: unless-stopped
     init: true
@@ -19,15 +19,51 @@ services:
       ACCOUNT_POOL_MIN: ${ACCOUNT_POOL_MIN:-50}
       ACCOUNT_POOL_MAX: ${ACCOUNT_POOL_MAX:-50}
       ACCOUNT_POOL_CRITICAL: ${ACCOUNT_POOL_CRITICAL:-10}
+      ACCOUNT_REFRESH_MS: ${ACCOUNT_REFRESH_MS:-1200000}
+      ACCOUNT_REPLENISH_MS: ${ACCOUNT_REPLENISH_MS:-90000}
+      ACCOUNT_STALE_MS: ${ACCOUNT_STALE_MS:-900000}
+      RATE_LIMIT_COOLDOWN_MS: ${RATE_LIMIT_COOLDOWN_MS:-600000}
+      HARVEST_RETRIES: ${HARVEST_RETRIES:-3}
+      HARVEST_RETRY_DELAY_MS: ${HARVEST_RETRY_DELAY_MS:-5000}
       HARVEST_BACKOFF_MS: ${HARVEST_BACKOFF_MS:-300000}
+      MAX_CONCURRENT_PER_ACCOUNT: ${MAX_CONCURRENT_PER_ACCOUNT:-6}
+      QUEUE_TIMEOUT_MS: ${QUEUE_TIMEOUT_MS:-60000}
+      ACCOUNT_TOMBSTONE_TTL_MS: ${ACCOUNT_TOMBSTONE_TTL_MS:-86400000}
+      SAKANA_SESSION_FILE: /app/runtime/session.json
+      SAKANA_ACCOUNT_POOL_FILE: /app/runtime/account_pool.json
       DISPLAY: :99
     volumes:
-      - ./session.json:/app/session.json
-      - ./account_pool.json:/app/account_pool.json
-      - ./keys.json:/app/keys.json
-      - ./tempmail.json:/app/tempmail.json
-      - ./character_cards:/app/character_cards
-      - ./.browser-profile:/app/.browser-profile
+      - type: bind
+        source: ./runtime
+        target: /app/runtime
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ./character_cards
+        target: /app/character_cards
+        bind:
+          create_host_path: true
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        runtime=/app/runtime
+        mkdir -p "$$runtime"
+        for name in session.json account_pool.json account_pool.remote.json keys.json tempmail.json tokens.json; do
+          if [ -f "/app/$$name" ] && [ ! -e "$$runtime/$$name" ]; then
+            cp -p "/app/$$name" "$$runtime/$$name"
+          fi
+          rm -rf "/app/$$name"
+          ln -s "$$runtime/$$name" "/app/$$name"
+        done
+        if [ -d /app/.browser-profile ] && [ ! -L /app/.browser-profile ] && [ ! -e "$$runtime/.browser-profile" ]; then
+          mkdir -p "$$runtime/.browser-profile"
+          cp -a /app/.browser-profile/. "$$runtime/.browser-profile/"
+        fi
+        rm -rf /app/.browser-profile
+        mkdir -p "$$runtime/.browser-profile"
+        ln -s "$$runtime/.browser-profile" /app/.browser-profile
+        exec /usr/local/bin/sakana-entrypoint.sh
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 30s

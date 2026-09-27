@@ -87,10 +87,11 @@ console.log('== account-pool regression tests ==');
   // The buggy refreshFn returns a session whose uid/email come from the
   // browser profile's IndexedDB (a DIFFERENT account).
   const fresh = { cookieHeader: `sakana-chat=real-sess; cf_clearance=newcf`, cookies: [], savedAt: Date.now(), loggedIn: true, uid: 'FOREIGN-UID', email: 'foreign@emalupe.com' };
-  pool.applyRefresh(entry, fresh);
+  const refreshed = pool.applyRefresh(entry, fresh);
+  check('T4 rejects a foreign refresh identity', refreshed === false);
   check('T4 refresh keeps the account\'s own uid', entry.uid === 'REAL-UID-1', `got ${entry.uid}`);
   check('T4 refresh keeps the account\'s own email', entry.email === 'real1@emalupe.com', `got ${entry.email}`);
-  check('T4 refresh updates cookies + state + refreshes count', entry.cookieHeader.includes('cf_clearance=newcf') && entry.state === 'active' && entry.refreshes === 1);
+  check('T4 rejects foreign cookies without changing state', !entry.cookieHeader.includes('cf_clearance=newcf') && entry.state === 'active' && entry.refreshes === 0);
 }
 
 // ---- TEST 5: save() round-trips the bleed-polluted shape losslessly (10 same-uid distinct sessions) ----
@@ -157,32 +158,79 @@ console.log('== Model-aware rotation (RATE-MODEL quota spread) ==');
   for (let i = 1; i <= 3; i++) {
     p.add({ email: `m${i}@x.com`, uid: `u${i}`, cookieHeader: `sakana-chat=m${i}` });
   }
-  const first = p.next('sakana-namazu-search');
-  const second = p.next('sakana-namazu-search');
-  const third = p.next('sakana-namazu-search');
-  const ids = [first.id, second.id, third.id];
-  check('model rotation covers all accounts before reusing', new Set(ids).size === 3, ids.join(','));
-  const again = p.next('sakana-namazu-search');
-  check('after all used, rotates back', ids.includes(again.id));
-  p.acquire(ids[0], 'sakana-namazu-search');
-  const other = p.next('sakana-fugu');
-  check('different model still returns an account', !!other.id);
+  const leases = [
+    p.lease('sakana-namazu-search'),
+    p.lease('sakana-namazu-search'),
+    p.lease('sakana-namazu-search'),
+  ];
+  const ids = leases.map((lease) => lease?.accountId);
+  check('model rotation covers all accounts before reusing', leases.every(Boolean) && new Set(ids).size === 3, ids.join(','));
+  const again = p.lease('sakana-namazu-search');
+  check('after all used, rotates back', !!again && ids.includes(again.accountId));
+  for (const lease of [...leases, again]) if (lease) p.releaseLease(lease, true);
+  const other = p.lease('sakana-fugu');
+  check('different model still returns an account', !!other?.accountId);
+  if (other) p.releaseLease(other, true);
 }
 
-process.exit(failures ? 1 : 0);
-console.log('== Model-aware rotation (RATE-MODEL quota spread) ==');
+// ---- TEST 9: explicit leases enforce per-account capacity and are idempotent ----
 {
-  const os = require('os');
-  const path = require('path');
-  const dir = os.tmpdir();
-  const file = path.join(dir, 'pool-model-' + Date.now() + '.json');
-  const { AccountPool } = require('../lib/account-pool.js');
-  const p = new AccountPool(file, path.join(dir, 'sess-model.json'), { minPool: 3, maxPool: 3 });
-  for (let i = 1; i <= 3; i++) {
-    p.add({ email: `m${i}@x.com`, uid: `u${i}`, cookieHeader: `sakana-chat=m${i}` });
-  }
-  const first = p.next('sakana-namazu-search');
-  const second = p.next('sakana-namazu-search');
-  const third = p.next('sakana-namazu-search');
-  const ids = [first.id, second.id, third.id];
+  const dir = tmpDir();
+  const pool = new AccountPool(path.join(dir, 'account_pool.json'), path.join(dir, 'session.json'), {
+    minPool: 1, maxPool: 1, maxConcurrentPerAccount: 1,
+  });
+  const id = pool.add({ uid: 'lease-uid', email: 'lease@example.com', cookieHeader: 'sakana-chat=lease-cookie', cookies: [] });
+  const first = pool.lease('sakana-namazu', { accountId: id, owner: 'test' });
+  const blocked = pool.lease('sakana-namazu', { accountId: id, owner: 'test-2' });
+  check('T9 first lease acquired', !!first && first.accountId === id);
+  check('T9 per-account capacity blocks second lease', blocked === null);
+  check('T9 release succeeds once', pool.releaseLease(first, true) === true);
+  check('T9 duplicate release is ignored', pool.releaseLease(first, true) === false);
+  check('T9 inFlight and success count settle once', pool.accounts[0].inFlight === 0 && pool.accounts[0].successCount === 1);
 }
+
+// ---- TEST 10: concurrent replenish callers share one in-flight harvest ----
+await (async () => {
+  const dir = tmpDir();
+  const pool = new AccountPool(path.join(dir, 'account_pool.json'), path.join(dir, 'session.json'), {
+    minPool: 2, maxPool: 2, harvestRetryDelayMs: 0,
+  });
+  let calls = 0;
+  const harvest = async () => {
+    calls++;
+    await new Promise(resolve => setTimeout(resolve, 15));
+    return { uid: 'sf-' + calls, email: `sf-${calls}@example.com`, cookieHeader: `sakana-chat=sf-${calls}`, cookies: [] };
+  };
+  const [a, b] = await Promise.all([pool.ensureMinPool(harvest), pool.ensureMinPool(harvest)]);
+  check('T10 concurrent ensure calls share one result', a === 2 && b === 2);
+  check('T10 concurrent ensure calls harvest only the deficit', calls === 2, `calls=${calls}`);
+})();
+
+// ---- TEST 11: a refresh result cannot resurrect a quarantined account ----
+{
+  const dir = tmpDir();
+  const pool = new AccountPool(path.join(dir, 'account_pool.json'), path.join(dir, 'session.json'));
+  const id = pool.add({ uid: 'state-uid', email: 'state@example.com', cookieHeader: 'sakana-chat=state-cookie', cookies: [] });
+  const acct = pool.accounts.find(a => a.id === id);
+  pool.markRateLimited(id, 'quota');
+  const applied = pool.applyRefresh(acct, { cookieHeader: 'sakana-chat=state-cookie; cf_clearance=new', cookies: [] }, acct.generation);
+  check('T11 refresh does not reactivate rate-limited account', applied === false && acct.state === 'rate_limited');
+}
+
+// ---- TEST 12: duplicate replacement never removes the old account ----
+await (async () => {
+  const dir = tmpDir();
+  const pool = new AccountPool(path.join(dir, 'account_pool.json'), path.join(dir, 'session.json'), {
+    minPool: 1, maxPool: 1, staleMs: 0, tombstoneTtlMs: 0,
+    harvestRetries: 1, harvestRetryDelayMs: 0,  });
+  const id = pool.add({ uid: 'replace-uid', email: 'replace@example.com', cookieHeader: 'sakana-chat=replace-cookie', cookies: [] });
+  const acct = pool.accounts.find(a => a.id === id);
+  acct.savedAt = 0;
+  await pool._runBackgroundCycle(
+    async () => ({ uid: 'replace-uid', email: 'replace@example.com', cookieHeader: 'sakana-chat=replace-cookie', cookies: [] }),
+    async () => null,
+  );
+  check('T12 duplicate replacement keeps old slot for diagnosis', pool.accounts.some(a => a.id === id && a.state === 'expired'));
+})();
+
+process.exit(failures ? 1 : 0);

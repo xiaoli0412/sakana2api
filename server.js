@@ -6,15 +6,18 @@ const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
-const { MODELS, openaiRequestToSakana, NdjsonTranslator, sse, clean, stripChips, extractFileContent } = require('./lib/translate');
+const { MODELS, openaiRequestToSakana, normalizedMessagesToPrompt, assertStandardModel, NdjsonTranslator, sse, clean, stripChips, extractFileContent } = require('./lib/translate');
 const { anthropicToChat, chatToAnthropicNonStream, AnthropicStreamer } = require('./lib/anthropic');
 const { SakanaUpstream, UpstreamError } = require('./lib/upstream');
-const { getSession, loadSession } = require('./lib/session');
+const { getSession, loadSession, setReloadHandler, SESSION_FILE } = require('./lib/session');
 const { autoSession } = require('./lib/auto-session');
 const { Stats, KeyStore } = require('./lib/stats');
 const { AccountPool } = require('./lib/account-pool');
 const { Cache } = require('./lib/cache');
 const { ContextStore, firstUserText, lastUserText } = require('./lib/context');
+const { normalizeRequestBody, AttachmentError } = require('./lib/request-normalizer');
+const { buildNormalizedSakanaRequest } = require('./lib/request-assembly');
+const { makeContextSnapshot, decideContext } = require('./lib/context-policy');
 const { concurrencyManager } = require('./lib/concurrency');
 const { parsePngCard, normalizeCard, saveCard, loadCard, listCards, buildCardSystemText } = require('./lib/character-card');
 const { buildRpSystem, resolveRpPreset, resolveRpNsfw, resolveRpLength } = require('./lib/rp-preset');
@@ -32,6 +35,14 @@ const HOST = process.env.HOST || '0.0.0.0';
 const API_KEY = process.env.API_KEY || '';
 const AUTO_SESSION = process.env.AUTO_SESSION !== 'false';
 const CACHE_ENABLED = process.env.CACHE_ENABLED !== 'false';
+const CONTEXT_COMPACT_THRESHOLD_BYTES = parseInt(process.env.CONTEXT_COMPACT_THRESHOLD_BYTES || '0', 10);
+const contextTelemetry = {
+  compactions: 0,
+  compactFailures: 0,
+  lastCompactAt: 0,
+  lastCompactError: '',
+};
+const compactedConversations = new Set();
 
 const stats = new Stats();
 const keyStore = new KeyStore();
@@ -42,13 +53,14 @@ const CARD_DIR = path.join(__dirname, 'character_cards');
 let activeCharacter = null;
 
 const upstream = new SakanaUpstream(() => {
-  // One account per request (AsyncLocalStorage): createConversation and
-  // streamGenerate must share the same session, else CONV-NOTFOUND-001.
   const bound = als.getStore();
   if (bound && bound.session) return bound.session;
-  // Fallback for non-request contexts (bootstrap keep-alive etc.)
-  const acct = accountPool.next();
-  if (acct) return acct;
+  // In manual mode, never select stale/quarantined pool records. The pool is
+  // only a provider in AUTO_SESSION mode; otherwise session.json is explicit.
+  if (AUTO_SESSION) {
+    const acct = accountPool.next();
+    if (acct) return acct;
+  }
   return getSession();
 });
 // built-in web UI (read per-request so edits apply live)
@@ -59,18 +71,57 @@ const AUDIT_MAX = 500;
 const AUDIT_BODY_MAX = parseInt(process.env.AUDIT_BODY_MAX || '10000', 10);
 const auditLog = [];
 
+function boundedAuditJson(value, depth = 0) {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value.length > 1200 ? value.slice(0, 1200) + '…' : value;
+  if (depth >= 4) return '[…]';
+  if (Array.isArray(value)) return value.slice(0, 24).map((item) => boundedAuditJson(item, depth + 1));
+  if (typeof value === 'object') {
+    const out = {};
+    for (const [key, item] of Object.entries(value).slice(0, 64)) {
+      if (/^(?:authorization|api[_-]?key|key|token|cookie|cookieHeader|idToken|refreshToken)$/i.test(key)) {
+        out[key] = '[REDACTED]';
+      } else {
+        out[key] = boundedAuditJson(item, depth + 1);
+      }
+    }
+    return out;
+  }
+  return String(value);
+}
+
+function safeAuditPath(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl || '/', 'http://audit.local');
+    const safe = new URLSearchParams();
+    for (const [key, value] of parsed.searchParams) {
+      if (/^(?:key|token|api[_-]?key|authorization|access[_-]?token)$/i.test(key)) continue;
+      safe.append(key, value.length > 200 ? value.slice(0, 200) : value);
+    }
+    const query = safe.toString();
+    return parsed.pathname + (query ? '?' + query : '');
+  } catch {
+    return String(rawUrl || '').split('?')[0].slice(0, 500);
+  }
+}
+
+function boundedAuditString(value) {
+  const raw = JSON.stringify(boundedAuditJson(value));
+  return raw.length > AUDIT_BODY_MAX ? raw.slice(0, AUDIT_BODY_MAX) + '…' : raw;
+}
+
 function auditEntry(req, body, status, response, error, duration) {
   const entry = {
     id: randomUUID().slice(0, 8),
     ts: Date.now(),
     method: req.method,
-    path: req.url,
+    path: safeAuditPath(req.url),
     model: body?.model || '',
     status,
     duration,
     error: error || null,
-    reqBody: JSON.stringify(body).slice(0, AUDIT_BODY_MAX),
-    resBody: JSON.stringify(response).slice(0, AUDIT_BODY_MAX),
+    reqBody: boundedAuditString(body),
+    resBody: boundedAuditString(response),
   };
   auditLog.unshift(entry);
   if (auditLog.length > AUDIT_MAX) auditLog.length = AUDIT_MAX;
@@ -81,6 +132,53 @@ function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
   res.end(body);
+}
+
+function isRpModelError(error) {
+  return String(error?.errorCode || error?.code || '') === 'RP-MODEL-DISABLED';
+}
+
+function sendRpModelError(res, error, gemini = false) {
+  if (gemini) return sendJson(res, 400, geminiErrorBody(400, `${error.message || 'RP models are disabled'} [RP-MODEL-DISABLED]`));
+  return sendJson(res, 400, {
+    error: {
+      message: error.message || 'RP models are disabled',
+      type: 'invalid_request_error',
+      code: 'RP-MODEL-DISABLED',
+    },
+  });
+}
+
+async function runChatResponse(chatBody, res) {
+  try {
+    return await makeChatResponse(chatBody);
+  } catch (error) {
+    if (isRpModelError(error)) {
+      sendRpModelError(res, error);
+      return null;
+    }
+    if (error instanceof AttachmentError) {
+      sendJson(res, 400, {
+        error: {
+          message: error.message,
+          type: 'invalid_request_error',
+          code: error.code || 'INVALID_ATTACHMENT',
+        },
+      });
+      return null;
+    }
+    if (String(error?.errorCode || error?.code || '') === 'CONTEXT-REBUILD-FAILED') {
+      sendJson(res, 409, {
+        error: {
+          message: error.message || 'conversation context could not be rebuilt',
+          type: 'invalid_request_error',
+          code: 'CONTEXT-REBUILD-FAILED',
+        },
+      });
+      return null;
+    }
+    throw error;
+  }
 }
 
 function memorySnapshot() {
@@ -149,26 +247,47 @@ function isAdmin(req) {
   return false;
 }
 
-/** Mark the session that served the failing request (rate-limit/expiry). */
-function markCurrentSession(err) {
-  const sess = upstream.lastSession;
-  if (!sess) return;
+/** Mark only the account/lease that served this request. */
+function markCurrentSession(err, leaseOrAccount = null) {
+  const store = als.getStore();
+  const subject = leaseOrAccount || store?.lease || store?.session || null;
+  const accountId = subject?.accountId || subject?.id || '';
+  if (!accountId || !err) return false;
+  const code = String(err.errorCode || err.code || '');
   let marked = false;
-  if (err && err.errorCode === 'AUTH-LOGIN-001') {
-    // Login gone on the Sakana side: the account itself is dead — expire it so
-    // a fresh harvest replaces it, instead of waiting out a cooldown.
-    if (sess.id) { accountPool.markExpired(sess.id); marked = true; }
+  const reason = `${code || 'UPSTREAM'} ${String(err.message || err)}`.trim();
+  if (code === 'AUTH-LOGIN-001' || code === 'AUTH-TOKEN-001' || code === 'AUTH-TOKEN-002' || code === 'AUTH-BOT-001' || code === 'CF-403') {
+    marked = accountPool.markExpired(accountId, reason);
+  } else if (code === 'RATE-LIMIT-001' || code === 'RATE-ANON-001') {
+    marked = accountPool.markRateLimited(accountId, reason);
   }
-  if (err && err.errorCode === 'RATE-LIMIT-001') {
-    if (sess.id) { accountPool.markRateLimited(sess.id); marked = true; }
+  if (marked && accountPool._harvestFn) accountPool.scheduleReplenish(accountPool._harvestFn);
+  return marked;
+}
+
+function isRetryableAccountError(err) {
+  const code = String(err?.errorCode || err?.code || '');
+  return /^(?:CONV-NOTFOUND-001|RATE-LIMIT-001|RATE-ANON-001|RATE-MODEL|AUTH-LOGIN-001|AUTH-TOKEN-001|AUTH-TOKEN-002|AUTH-BOT-001|CF-403|UPSTREAM-TIMEOUT)$/.test(code);
+}
+
+function clearContextForAccountRetry(body, req = null) {
+  const oldIds = [body.conversation_id, body.chat_id, body.thread_id,
+    req?.headers?.['x-conversation-id'], req?.headers?.['x-thread-id']].filter(Boolean);
+  const resolved = (typeof contextStore?.lookup === 'function')
+    ? contextStore.lookup(req || {}, body)
+    : null;
+  if (resolved?.conversationId) oldIds.push(resolved.conversationId);
+  for (const id of new Set(oldIds)) contextStore.clearConversation?.(id);
+  body.conversation_id = undefined;
+  body.chat_id = undefined;
+  body.thread_id = undefined;
+  if (req?.headers) {
+    delete req.headers['x-conversation-id'];
+    delete req.headers['x-thread-id'];
   }
-  if (err && (err.errorCode === 'CF-403' || err.errorCode === 'AUTH-TOKEN-001')) {
-    if (sess.id) { accountPool.markExpired(sess.id); marked = true; }
-  }
-  // Event-driven top-up: don't wait for the 90s replenish tick after a failure.
-  if (marked && accountPool._harvestFn) {
-    accountPool.scheduleReplenish(accountPool._harvestFn);
-  }
+  Object.defineProperty(body, '__forceNewContext', { value: true, enumerable: false, configurable: true, writable: true });
+  Object.defineProperty(body, '__ignoreExplicitContext', { value: true, enumerable: false, configurable: true, writable: true });
+  Object.defineProperty(body, '__contextRebuildAttempted', { value: true, enumerable: false, configurable: true, writable: true });
 }
 
 // ---- native tool-round continuation ---------------------------------------
@@ -268,25 +387,80 @@ function lookupContext(req, body) {
   return contextStore.lookup(req, body);
 }
 
-function saveContext(req, body, conversationId, lastMessageId, explicitAccountId = null) {
+function saveContext(req, body, conversationId, lastMessageId, explicitAccountId = null, snapshot = null) {
   if (!conversationId) return;
-  if (typeof req === 'string') {
-    return contextStore.save(req, undefined, conversationId, lastMessageId, explicitAccountId);
-  }
   const bound = als.getStore();
+  const previous = contextStore.getByConversationId(conversationId) || (typeof req === 'string' ? contextStore.lookup(req) : contextStore.lookup(req, body));
+  const requestedMode = String(body?.history_mode || body?.historyMode || '').toLowerCase();
+  const explicitContextId = body?.conversation_id || body?.chat_id || body?.thread_id ||
+    (req?.headers && (req.headers['x-conversation-id'] || req.headers['x-thread-id'])) || '';
+  const delta = requestedMode === 'delta' || (!!explicitContextId && !requestedMode);
+  const effectiveSnapshot = delta && previous && snapshot
+    ? {
+        ...snapshot,
+        firstMessageFingerprint: previous.firstMessageFingerprint || snapshot.firstMessageFingerprint,
+        messageCount: Math.max(Number(previous.messageCount) || 0, Number(snapshot.messageCount) || 0),
+      }
+    : snapshot;
+  if (typeof req === 'string') {
+    const result = contextStore.save(req, undefined, conversationId, lastMessageId, explicitAccountId, effectiveSnapshot);
+    if (lastMessageId) contextStore.updateLeaf(conversationId, lastMessageId, effectiveSnapshot);
+    return result;
+  }
   const accountId = explicitAccountId || (bound && bound.session && bound.session.id) || '';
-  return contextStore.save(req, body, conversationId, lastMessageId, accountId);
+  const result = contextStore.save(req, body, conversationId, lastMessageId, accountId, effectiveSnapshot);
+  if (lastMessageId) contextStore.updateLeaf(conversationId, lastMessageId, effectiveSnapshot);
+  return result;
 }
 
+async function refreshContextLeaf(conversationId, fallback = '') {
+  if (!conversationId) return '';
+  try {
+    const fresh = await upstream.getLastMessageId(conversationId);
+    return fresh || fallback || '';
+  } catch {
+    return fallback || '';
+  }
+}
+
+async function maybeCompactConversation(conversationId, leafMessageId, normalized) {
+  if (!conversationId || !leafMessageId || !Number.isFinite(CONTEXT_COMPACT_THRESHOLD_BYTES) || CONTEXT_COMPACT_THRESHOLD_BYTES <= 0) return false;
+  if (compactedConversations.has(conversationId)) return false;
+  const bytes = Number(normalized?.measurements?.totalBytes || normalized?.textBytes || 0);
+  if (bytes < CONTEXT_COMPACT_THRESHOLD_BYTES) return false;
+  try {
+    await upstream.compactConversation(conversationId, leafMessageId);
+    compactedConversations.add(conversationId);
+    contextTelemetry.compactions++;
+    contextTelemetry.lastCompactAt = Date.now();
+    return true;
+  } catch (error) {
+    contextTelemetry.compactFailures++;
+    contextTelemetry.lastCompactAt = Date.now();
+    contextTelemetry.lastCompactError = String(error?.message || error).slice(0, 200);
+    return false;
+  }
+}
+
+async function finalizeContext(body, normalized, conversationId, fallbackLeaf, req = {}, snapshot = null) {
+  const finalLeaf = await refreshContextLeaf(conversationId, fallbackLeaf);
+  saveContext(req, body, conversationId, finalLeaf, null, snapshot);
+  await maybeCompactConversation(conversationId, finalLeaf, normalized);
+  return finalLeaf;
+}
+
+
 /** Inject character card data into the messages array. */
-function injectCharacterCard(messages, card) {
+function injectCharacterCard(messages, card, isNewConversation = null) {
   if (!card || !card.name || !Array.isArray(messages)) return messages;
   const msgs = [...messages];
-  const isNewConversation = !msgs.some(m => m.role === 'assistant');
-  const sysText = buildCardSystemText(card, isNewConversation);
+  const shouldSeed = isNewConversation === null
+    ? !msgs.some(m => m.role === 'assistant')
+    : Boolean(isNewConversation);
+  const sysText = buildCardSystemText(card, shouldSeed);
   if (sysText) msgs.unshift({ role: 'system', content: sysText });
   // first_mes as the first assistant message if the conversation is new
-  if (card.first_mes && isNewConversation) {
+  if (card.first_mes && shouldSeed) {
     msgs.push({ role: 'assistant', content: card.first_mes });
   }
   return msgs;
@@ -343,7 +517,12 @@ async function handleChatCompletions(req, res) {
   // 请求体双向兼容:Gemini generateContent 形态(contents[])在 OpenAI 端点上
   // 也能直接受理,自动翻译为内部消息格式(RP 客户端混用端点时不出错)。
   if (isGeminiBody(body)) {
-    body = geminiRequestToChat(body, { model: req.headers['x-target-model'] || body.model || '', stream: body.stream !== false });
+    try {
+      body = geminiRequestToChat(body, { model: req.headers['x-target-model'] || body.model || '', stream: body.stream !== false });
+    } catch (error) {
+      if (isRpModelError(error)) return sendRpModelError(res, error);
+      throw error;
+    }
   }
   return handleChatBody(req, res, body);
 }
@@ -356,9 +535,21 @@ async function handleGeminiGenerate(req, res, route, url) {
   const altSse = String((url && url.searchParams.get('alt')) || '').toLowerCase() === 'sse';
   const stream = route.action === 'streamGenerateContent' || altSse || body.stream === true;
   // 请求体双向适配:Gemini 端点也接受 OpenAI messages 请求体
-  const chatBody = isGeminiBody(body)
-    ? geminiRequestToChat(body, { model: route.model, stream })
-    : { ...body, model: body.model || route.model, stream };
+  const chatBody = (() => {
+    try {
+      return isGeminiBody(body)
+        ? geminiRequestToChat(body, { model: route.model, stream })
+        : { ...body, model: body.model || route.model, stream };
+    } catch (error) {
+      if (isRpModelError(error)) {
+        sendRpModelError(res, error, true);
+        return null;
+      }
+      throw error;
+    }
+  })();
+  if (!chatBody) return;
+
   chatBody.stream = stream;
   const adapter = createGeminiResponseAdapter(res, { model: chatBody.model });
   return handleChatBody(req, adapter, chatBody);
@@ -366,67 +557,168 @@ async function handleGeminiGenerate(req, res, route, url) {
 
 /** 所有聊天入口共用的管线(角色卡注入 / 并发控制 / 容错重试)。 */
 async function handleChatBody(req, res, body, start = Date.now()) {
-
-  // Character card injection: either a per-request character_id or the
-  // globally active character (set via the /api/characters panel).
+  let normalized;
+  let contextSnapshot;
   try {
-    const charId = body.character_id || req.headers['x-character-id'] || '';
-    const card = charId ? loadCard(CARD_DIR, charId) : activeCharacter;
-    if (card && card.name && body.messages) body.messages = injectCharacterCard(body.messages, card);
-  } catch (e) { console.log('[character-card] inject error:', String(e.message || e).slice(0, 120)); }
-
-  try {
-    await concurrencyManager.acquire(accountPool);
+    normalized = await normalizeRequestBody(body);
+    contextSnapshot = makeContextSnapshot(normalized);
   } catch (err) {
-    return sendJson(res, 429, { error: { message: 'Server busy: ' + err.message, type: 'rate_limit_error', code: 'SERVER-BUSY' } });
+    if (err instanceof AttachmentError) {
+      return sendJson(res, 400, { error: { message: err.message, type: 'invalid_request_error', code: err.code } });
+    }
+    throw err;
+  }
+  Object.defineProperty(body, '__contextSnapshot', { value: contextSnapshot, enumerable: false, configurable: true, writable: true });
+  Object.defineProperty(body, '__normalizedRequest', { value: normalized, enumerable: false, configurable: true, writable: true });
+
+  // Character card injection changes the effective prompt and history identity.
+  // Resolve the client context first so an explicit delta continuation never
+  // receives the card's first_mes again.
+  const charId = body.character_id || req.headers['x-character-id'] || '';
+  let card = null;
+  try {
+    card = charId ? loadCard(CARD_DIR, charId) : activeCharacter;
+  } catch (e) {
+    console.log('[character-card] load error:', String(e.message || e).slice(0, 120));
+  }
+  if (card && card.name && body.messages) {
+    const explicitContextId = body.conversation_id || body.chat_id || body.thread_id ||
+      req.headers['x-conversation-id'] || req.headers['x-thread-id'] || '';
+    const existingContext = lookupContext(req, body);
+    const contextMatches = !!existingContext && (!explicitContextId ||
+      existingContext.conversationId === explicitContextId ||
+      (existingContext.clientConversationIds || []).includes(explicitContextId));
+    const isNewConversation = !body.__contextRebuildAttempted && !contextMatches;
+    try {
+      body.messages = injectCharacterCard(body.messages, card, isNewConversation);
+    } catch (e) {
+      console.log('[character-card] inject error:', String(e.message || e).slice(0, 120));
+    }
+    try {
+      normalized = await normalizeRequestBody(body);
+    } catch (err) {
+      if (err instanceof AttachmentError) {
+        return sendJson(res, 400, { error: { message: err.message, type: 'invalid_request_error', code: err.code } });
+      }
+      throw err;
+    }
+    contextSnapshot = makeContextSnapshot(normalized);
+    Object.defineProperty(body, '__contextSnapshot', { value: contextSnapshot, enumerable: false, configurable: true, writable: true });
+    Object.defineProperty(body, '__normalizedRequest', { value: normalized, enumerable: false, configurable: true, writable: true });
   }
 
-  const RETRYABLE = /CONV-NOTFOUND-001|RATE-LIMIT-001|RATE-MODEL|AUTH-LOGIN-001|CF-403|UPSTREAM-TIMEOUT/;
+  const model = body.model || 'sakana-namazu';
+  let acquired = false;
   try {
+    assertStandardModel(model);
+    try {
+      await concurrencyManager.acquire(AUTO_SESSION ? accountPool : null);
+      acquired = true;
+    } catch (err) {
+      return sendJson(res, 429, { error: { message: 'Server busy: ' + err.message, type: 'rate_limit_error', code: 'SERVER-BUSY' } });
+    }
+    const excludedAccounts = new Set();
+    let ctxEntry = null;
     for (let attempt = 0; ; attempt++) {
-      // 1. Check conversation context affinity
-      let boundAccount = null;
-      let ctxEntry = lookupContext(req, body);
-
-      if (ctxEntry && ctxEntry.accountId) {
-        const candidate = accountPool.get(ctxEntry.accountId);
-        if (candidate && candidate.state === 'active') {
-          boundAccount = candidate;
+      const contextForcedNew = !!body.__forceNewContext || !!body.__ignoreExplicitContext;
+      const lookedUp = contextForcedNew ? null : lookupContext(req, body);
+      const explicitContextId = contextForcedNew ? '' : body.conversation_id || body.chat_id || body.thread_id ||
+        req.headers['x-conversation-id'] || req.headers['x-thread-id'] || '';
+        const contextDecision = decideContext({
+          explicitId: explicitContextId,
+          stored: lookedUp,
+          client: contextSnapshot,
+          rebuildAttempted: !!body.__contextRebuildAttempted,
+          historyMode: body.history_mode || body.historyMode || '',
+        });
+        if (contextDecision.action === 'rebuild' && !body.__contextRebuildAttempted) {
+          clearContextForAccountRetry(body, req);
+          ctxEntry = null;
         } else {
-          // Pinned account is rate-limited or expired -> transparently migrate conversation
-          ctxEntry = null; // Re-bootstrap fresh conversation on new account
+        ctxEntry = contextDecision.action === 'fork' ? null : lookedUp;
+        if (contextDecision.action === 'fork') clearContextForAccountRetry(body, req);
+      }
+        if (contextDecision.reason === 'CONTEXT-REBUILD-FAILED') {
+          throw Object.assign(new Error('conversation context could not be rebuilt'), { errorCode: contextDecision.reason, status: 409 });
+        }
+
+      let lease = null;
+      if (AUTO_SESSION && ctxEntry && ctxEntry.accountId && !excludedAccounts.has(ctxEntry.accountId)) {
+        lease = accountPool.lease(model, { accountId: ctxEntry.accountId, owner: req.headers['x-request-id'] || '' });
+        if (!lease) {
+          // A dead or saturated affinity account cannot be used for this turn.
+          // Rebuild on a fresh account instead of sending the old conversation
+          // id to an account that cannot see it.
+          excludedAccounts.add(ctxEntry.accountId);
+          ctxEntry = null;
+          clearContextForAccountRetry(body, req);
         }
       }
-
+      if (!lease && AUTO_SESSION) {
+        lease = accountPool.lease(model, { excludeIds: [...excludedAccounts], owner: req.headers['x-request-id'] || '' });
+      }
+      const boundAccount = lease
+        ? lease.account
+        : await getSession().catch(() => null);
       if (!boundAccount) {
-        const acct = accountPool.next(body.model || 'sakana-namazu');
-        boundAccount = acct || await getSession().catch(() => null);
+        const noAccount = Object.assign(new Error('no active Sakana account'), { errorCode: 'AUTH-LOGIN-001', status: 503 });
+        if (lease) accountPool.releaseLease(lease, false, { error: noAccount.message });
+        throw noAccount;
       }
 
-      if (boundAccount && boundAccount.id) accountPool.acquire(boundAccount.id, body.model || 'sakana-namazu');
       try {
-        const result = await als.run({ session: boundAccount, ctxEntry }, () => handleChatInner(req, res, body, start, ctxEntry));
-        if (boundAccount && boundAccount.id) accountPool.release(boundAccount.id, true);
+        const result = await als.run({ session: boundAccount, lease, ctxEntry }, () => handleChatInner(req, res, body, start, ctxEntry));
+        const streamFailed = result && result.streamError;
+        if (lease) accountPool.releaseLease(lease, !streamFailed, { error: result?.streamError || '' });
+        if (streamFailed) markCurrentSession({ errorCode: result.streamErrorCode, message: result.streamError }, lease);
         return result;
       } catch (e) {
-        if (boundAccount && boundAccount.id) accountPool.release(boundAccount.id, false);
-        const code = (e && (e.errorCode || e.code)) || '';
-        // RATE-MODEL-* = per-model quota window on the upstream (free tier):
-        // the account itself is healthy, so rotate to a different account and
-        // retry without cooling the account down. Other retryable codes cool
-        // the account so the pool stops selecting it.
+        if (lease) accountPool.releaseLease(lease, false, { error: e.message || e });
+        const code = String(e?.errorCode || e?.code || '');
+        if (code === 'RP-MODEL-DISABLED') {
+          throw e;
+        }
         const modelQuota = code.startsWith('RATE-MODEL');
-        const maxRetries = modelQuota ? 2 : 1;
-        if (attempt < maxRetries && !res.headersSent && (!code || RETRYABLE.test(String(code) + ' ' + String(e.message)))) {
-          if (boundAccount && boundAccount.id && !modelQuota) accountPool.markRateLimited(boundAccount.id);
-          console.log(`[chat] migrating/retrying conversation with fresh account (${code || e.message})`);
+        const retryable = isRetryableAccountError(e);
+        if (retryable && !res.headersSent && attempt < (modelQuota ? 2 : 1)) {
+          if (lease && lease.accountId) {
+            excludedAccounts.add(lease.accountId);
+            if (!modelQuota) markCurrentSession(e, lease);
+          }
+          // A retry on another account must not reuse the old account's
+          // conversation, including when the client supplied an explicit id.
+          ctxEntry = null;
+          clearContextForAccountRetry(body, req);
+          console.log(`[chat] retrying on a different account (${code || e.message})`);
           continue;
         }
+        // The last retryable auth/rate failure still belongs to this account.
+        // Record it before surfacing the error so the pool will not immediately
+        // select the same bad session on the next request.
+        if (retryable && lease && !modelQuota) markCurrentSession(e, lease);
         throw e;
       }
     }
+  } catch (e) {
+    if (res.headersSent) {
+      try { res.end(); } catch {}
+    } else {
+      const status = e.status >= 500 ? 502 : (e.status || 500);
+      const code = e.errorCode || e.code || 'UPSTREAM-ERROR';
+      const message = e instanceof UpstreamError
+        ? `upstream ${code}: ${e.message}`
+        : String(e.message || e);
+      if (body.__statsStarted) {
+        stats.finish({ stream: body.stream !== false, ok: false, error: message, model: body.model || 'sakana-namazu', keyId: req.keyId });
+      }
+      auditEntry(req, body, status, null, message, Date.now() - start);
+      if (isRpModelError(e)) {
+        return sendRpModelError(res, e);
+      }
+      sendJson(res, status, { error: { message, type: 'upstream_error', code } });
+    }
   } finally {
-    concurrencyManager.release();
+    if (acquired) concurrencyManager.release();
   }
 }
 
@@ -434,11 +726,18 @@ async function handleChatBody(req, res, body, start = Date.now()) {
 async function handleChatInner(req, res, body, start, ctxEntry) {
 
   try {
-    const sakanaReq = openaiRequestToSakana(body);
+    const normalized = body.__normalizedRequest || await normalizeRequestBody(body);
+    const contextSnapshot = body.__contextSnapshot || makeContextSnapshot(normalized);
+    const assembled = buildNormalizedSakanaRequest(body, normalized, ctxEntry);
+    const sakanaReq = assembled.sakanaReq;
+    const effectiveNormalized = assembled.normalized;
+    sakanaReq.messageFingerprint = effectiveNormalized.fingerprint || normalized.fingerprint;
+    sakanaReq.contextSnapshot = contextSnapshot;
     injectRpRules(sakanaReq, req, body);
     const streaming = body.stream !== false;
     const modelName = body.model || 'sakana-namazu';
     stats.begin(modelName);
+    Object.defineProperty(body, '__statsStarted', { value: true, enumerable: false, configurable: true, writable: true });
     let promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
     if (process.env.DEBUG_PROMPT) console.log('[prompt:' + modelName + ']', (sakanaReq.prompt || '').slice(0, parseInt(process.env.DEBUG_PROMPT_LEN || '500', 10)).replace(/\n/g, '\\n'));
 
@@ -447,6 +746,10 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       const textParts = [];
       const remaining = [];
       for (const f of sakanaReq.files) {
+        if (f.name === 'context_document.txt') {
+          remaining.push(f);
+          continue;
+        }
         const ext = extractFileContent(f);
         if (ext === null) { remaining.push(f); }
         else if (ext.text) { textParts.push(ext.text); }
@@ -458,7 +761,9 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     }
 
     // Check cache
-    const cacheKey = CACHE_ENABLED ? cache.key(body) : null;
+    const explicitConversation = body.conversation_id || body.chat_id || body.thread_id || '';
+    const cacheable = CACHE_ENABLED && !explicitConversation && !sakanaReq.isToolTurn && !(sakanaReq.tools && sakanaReq.tools.length) && !(sakanaReq.files && sakanaReq.files.some((f) => f && f.output));
+    const cacheKey = cacheable ? cache.key(body, { semanticFingerprint: sakanaReq.messageFingerprint, normalized: sakanaReq.normalizedMessages }) : null;
     if (cacheKey && !streaming) {
       const cached = cache.get(cacheKey);
       if (cached) {
@@ -469,12 +774,12 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     }
 
     let conversationId = sakanaReq.conversationId;
-    let lastMessageId = '';
+    let lastMessageId = ctxEntry?.lastMessageId || '';
 
     // Auto-context lookup (client continues without passing conversation_id).
     // ctxEntry was resolved before account binding; reuse it to keep the same
     // account that owns the conversation (CONV-NOTFOUND-001 otherwise).
-    if (!conversationId && ctxEntry) {
+    if (!conversationId && !body.__forceNewContext && ctxEntry) {
       conversationId = ctxEntry.conversationId;
       lastMessageId = ctxEntry.lastMessageId || '';
       if (!lastMessageId) {
@@ -493,7 +798,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       conversationId = boot.conversationId;
       stats.convCreated();
       lastMessageId = boot.systemMessageId;
-    } else {
+    } else if (!lastMessageId) {
       lastMessageId = await upstream.getLastMessageId(conversationId);
     }
 
@@ -531,7 +836,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       // reported as "no reply with no error").
       if (!text && !toolCalls.length) {
         stats.finish({ stream: false, ok: false, error: 'empty upstream response', model: modelName, keyId: req.keyId });
-        saveContext(req, body, conversationId, lastMessageId);
+        const finalLeaf = await finalizeContext(body, normalized, conversationId, lastMessageId, req, contextSnapshot);
         auditEntry(req, body, 200, null, 'empty upstream response', Date.now() - start);
         return sendJson(res, 200, { error: { message: 'upstream returned empty response (no content)', type: 'upstream_error', code: 'EMPTY-RESPONSE' } });
       }
@@ -553,17 +858,15 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
         response.citations = t.citations;
       }
       stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: req.keyId });
-      saveContext(req, body, conversationId, lastMessageId);
+      const finalLeaf = await finalizeContext(body, normalized, conversationId, lastMessageId, req, contextSnapshot);
       if (cacheKey) cache.set(cacheKey, response);
-      res.setHeader('x-conversation-id', conversationId || '');
-      const entry = auditEntry(req, body, 200, response, null, Date.now() - start);
       return sendJson(res, 200, response);
     }
 
     // streaming
     res.setHeader('x-conversation-id', conversationId || '');
     sseHeaders(res);
-    const t = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
+    let t = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
     let streamedChars = 0;
     const base = { id: t.assistantMessageId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: modelName };
     let streamError = null;
@@ -583,6 +886,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
         try {
           const contT = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
           const leaf = await upstream.getLastMessageId(conversationId);
+          lastMessageId = leaf;
           const contReq = { ...sakanaReq, isContinue: true, prompt: undefined, files: [] };
           const contResp = await upstream.streamGenerate(conversationId, contReq, { lastMessageId: leaf });
           await drainUpstreamRound(contResp, contT, onChunk);
@@ -622,22 +926,14 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     } catch {}
     const ok = !streamError;
     stats.finish({ stream: true, ok, model: modelName, promptChars, completionChars: streamedChars, keyId: req.keyId });
-    saveContext(req, body, conversationId, lastMessageId);
-    auditEntry(req, body, ok ? 200 : 500, null, streamError, Date.now() - start);
+    const finalLeaf = await finalizeContext(body, normalized, conversationId, lastMessageId, req, contextSnapshot);
+    return { streamError: streamError || '', streamErrorCode: streamErrCode || '' };
   } catch (e) {
-    if (res.headersSent) { try { res.end(); } catch {} return; }
-    // Detect rate-limit / session-dead errors and rotate the account
-    if (e instanceof UpstreamError) {
-      markCurrentSession(e);
-      const errResp = { error: { message: `upstream ${e.errorCode || e.status}: ${e.message}`, type: 'upstream_error', code: e.errorCode } };
-      stats.finish({ stream: false, ok: false, error: String(e.message || e), model: body.model || 'sakana-namazu', keyId: req.keyId });
-      auditEntry(req, body, e.status >= 500 ? 502 : e.status, null, e.message, Date.now() - start);
-      sendJson(res, e.status >= 500 ? 502 : e.status, errResp);
-    } else {
-      stats.finish({ stream: false, ok: false, error: String(e.message || e), model: body.model || 'sakana-namazu', keyId: req.keyId });
-      auditEntry(req, body, 500, null, e.message, Date.now() - start);
-      sendJson(res, 500, { error: { message: String(e.message || e), type: 'internal_error' } });
-    }
+    // Let the outer lease/retry coordinator classify errors before headers are
+    // sent. Sending here used to make retries look like successful requests.
+    if (!res.headersSent) throw e;
+    try { res.end(); } catch {}
+    return { streamError: String(e.message || e), streamErrorCode: e.errorCode || e.code || 'STREAM-ERROR' };
   }
 }
 
@@ -647,9 +943,10 @@ async function handleLegacyCompletions(req, res) {
   try {
     body = JSON.parse((await readBody(req)).toString('utf8'));
     if (body.prompt === undefined && body.input === undefined) throw new Error('missing prompt');
-  } catch (e) {
-    return sendJson(res, 400, { error: { message: 'invalid JSON or missing prompt: ' + e.message, type: 'invalid_request_error' } });
-  }
+      } catch (e) {
+        if (isRpModelError(e)) return sendRpModelError(res, e);
+        return sendJson(res, 400, { error: { message: 'invalid JSON or missing prompt: ' + e.message, type: 'invalid_request_error' } });
+      }
   // Normalize into chat.completions and translate back to legacy output.
   const chatBody = {
     ...body,
@@ -658,7 +955,8 @@ async function handleLegacyCompletions(req, res) {
   delete chatBody.prompt;
   delete chatBody.completion;
   const stream = body.stream === true;
-  const reader = await makeChatResponse(chatBody);
+  const reader = await runChatResponse(chatBody, res);
+  if (!reader) return;
   if (stream) {
     sseHeaders(res);
     for await (const c of reader) res.write(sse(c.event || 'chat.completion.chunk', c.data));
@@ -696,7 +994,8 @@ async function handleResponses(req, res) {
   delete chatBody.tool_choice;
   delete chatBody.parallel_tool_calls;
   const stream = body.stream === true;
-  const reader = await makeChatResponse(chatBody);
+  const reader = await runChatResponse(chatBody, res);
+  if (!reader) return;
   if (stream) {
     // Emit OpenAI response-format chunks (response.output_text.delta) for compat.
     sseHeaders(res);
@@ -710,6 +1009,7 @@ async function handleResponses(req, res) {
     return res.end('data: [DONE]\n\n');
   }
   const text = reader.content || '';
+  if (reader.error) return sendJson(res, 502, { error: { message: reader.error, type: 'upstream_error', code: 'EMPTY-RESPONSE' } });
   return sendJson(res, 200, {
     id: 'resp_' + randomUUID().replace(/-/g, '').slice(0, 12),
     object: 'response',
@@ -734,7 +1034,8 @@ async function handleAnthropicMessages(req, res) {
   }
   const stream = body.stream === true;
   chatBody.stream = stream;
-  const reader = await makeChatResponse(chatBody);
+  const reader = await runChatResponse(chatBody, res);
+  if (!reader) return;
   if (stream) {
     sseHeaders(res);
     const streamer = new AnthropicStreamer({ model: chatBody.model || 'sakana-namazu' });
@@ -753,6 +1054,7 @@ async function handleAnthropicMessages(req, res) {
     return res.end('data: [DONE]\n\n');
   }
   const toolCalls = reader.toolCalls || [];
+  if (reader.error) return sendJson(res, 502, { error: { message: reader.error, type: 'upstream_error', code: 'EMPTY-RESPONSE' } });
   const finishReason = reader.finishReason || (!reader.content && toolCalls.length ? 'tool_calls' : 'stop');
   return sendJson(res, 200, chatToAnthropicNonStream({
     model: chatBody.model || 'sakana-namazu',
@@ -770,39 +1072,133 @@ async function handleAnthropicMessages(req, res) {
  * promptTokens, completionTokens } or an AsyncGenerator of SSE chunks when stream.
  */
 async function makeChatResponse(chatBody) {
-  // bind one account to the whole multi-call flow; retry once on account-level errors
-  const RETRYABLE = /CONV-NOTFOUND-001|RATE-LIMIT-001|RATE-MODEL|AUTH-LOGIN-001|CF-403|UPSTREAM-TIMEOUT/;
-  // Also pin the account for auto-context continuations (same rule as chat handler).
-  const ctxEntry = firstUserText(chatBody) ? lookupContext(firstUserText(chatBody)) : null;
-  for (let attempt = 0; ; attempt++) {
-    let bound = null;
-    if (ctxEntry && ctxEntry.accountId) bound = accountPool.get(ctxEntry.accountId);
-    if (!bound) bound = await accountPool.next(chatBody.model || 'sakana-namazu') || await getSession().catch(() => null);
-    if (bound && bound.id) accountPool.acquire(bound.id, chatBody.model || 'sakana-namazu');
+  const normalized = chatBody.__normalizedRequest || await normalizeRequestBody(chatBody);
+  let contextSnapshot = chatBody.__contextSnapshot || makeContextSnapshot(normalized);
+  const explicitContextId = chatBody.conversation_id || chatBody.chat_id || chatBody.thread_id || '';
+  const ctxCandidate = lookupContext({}, chatBody);
+  const contextMatches = !explicitContextId
+    ? !!ctxCandidate
+    : !!ctxCandidate && (
+      ctxCandidate.conversationId === explicitContextId ||
+      (ctxCandidate.clientConversationIds || []).includes(explicitContextId)
+    );
+
+  // Decide whether this is a genuinely new conversation before injecting a
+  // character card. An explicit delta turn has no assistant message of its own
+  // but must not receive the card's first_mes a second time.
+  const charId = chatBody.character_id || '';
+  const card = charId ? loadCard(CARD_DIR, charId) : activeCharacter;
+  if (card && card.name && Array.isArray(chatBody.messages)) {
     try {
-      // Character card injection for responses / anthropic paths
-      try {
-        const charId = chatBody.character_id || '';
-        const card = charId ? loadCard(CARD_DIR, charId) : activeCharacter;
-        if (card && card.name && chatBody.messages) chatBody.messages = injectCharacterCard(chatBody.messages, card);
-      } catch (e) { console.log('[character-card] inject error (makeChatResponse):', String(e.message || e).slice(0, 120)); }
-      const result = await als.run({ session: bound, ctxEntry }, () => makeChatResponseInner(chatBody));
-      if (bound && bound.id) accountPool.release(bound.id, true);
-      return result;
-    } catch (e) {
-      if (bound && bound.id) accountPool.release(bound.id, false);
-      const code = (e && (e.errorCode || e.code)) || '';
-      // RATE-MODEL-*: per-model quota window — rotate accounts without cooling
-      // the healthy account down (same rule as the chat path).
-      const modelQuota = code.startsWith('RATE-MODEL');
-      const maxRetries = modelQuota ? 2 : 1;
-      if (attempt < maxRetries && (!code || RETRYABLE.test(String(code) + ' ' + String(e.message)))) {
-        if (bound && bound.id && !modelQuota) accountPool.markRateLimited(bound.id);
-        console.log('[makeChatResponse] retrying with fresh account (' + (code || e.message) + ')');
-        continue;
-      }
-      throw e;
+      chatBody.messages = injectCharacterCard(
+        chatBody.messages,
+        card,
+        !contextMatches,
+      );
+    } catch (e) { console.log('[character-card] inject error (makeChatResponse):', String(e.message || e).slice(0, 120)); }
+    try {
+      normalized = await normalizeRequestBody(chatBody);
+    } catch (err) {
+      if (err instanceof AttachmentError) throw err;
+      throw err;
     }
+    contextSnapshot = makeContextSnapshot(normalized);
+  }
+
+  const contextDecision = decideContext({
+    explicitId: explicitContextId,
+    stored: ctxCandidate,
+    client: contextSnapshot,
+    historyMode: chatBody.history_mode || chatBody.historyMode || '',
+    rebuildAttempted: !!chatBody.__contextRebuildAttempted,
+  });
+  let ctxEntry = contextDecision.action === 'fork' || contextDecision.action === 'rebuild' ? null : ctxCandidate;
+  if (contextDecision.action === 'fork' || contextDecision.action === 'rebuild') clearContextForAccountRetry(chatBody);
+  if (contextDecision.reason === 'CONTEXT-REBUILD-FAILED') {
+    throw Object.assign(new Error('conversation context could not be rebuilt'), { errorCode: contextDecision.reason, status: 409 });
+  }
+  Object.defineProperty(chatBody, '__contextSnapshot', { value: contextSnapshot, enumerable: false, configurable: true, writable: true });
+  Object.defineProperty(chatBody, '__normalizedRequest', { value: normalized, enumerable: false, configurable: true, writable: true });
+  Object.defineProperty(chatBody, '__forceNewContext', { value: !!chatBody.__forceNewContext || contextDecision.action === 'fork' || contextDecision.action === 'rebuild', enumerable: false, configurable: true, writable: true });
+  Object.defineProperty(chatBody, '__ignoreExplicitContext', { value: !!chatBody.__ignoreExplicitContext || contextDecision.action === 'rebuild', enumerable: false, configurable: true, writable: true });
+
+  const model = chatBody.model || 'sakana-namazu';
+  assertStandardModel(model);
+  await concurrencyManager.acquire(AUTO_SESSION ? accountPool : null);
+  let slotTransferred = false;
+  const excludedAccounts = new Set();
+  try {
+    for (let attempt = 0; ; attempt++) {
+      let lease = null;
+      let activeCtxEntry = ctxEntry;
+      if (AUTO_SESSION && activeCtxEntry?.accountId && !excludedAccounts.has(activeCtxEntry.accountId)) {
+        lease = accountPool.lease(model, { accountId: activeCtxEntry.accountId, owner: chatBody.__requestId || '' });
+        if (!lease) {
+          excludedAccounts.add(activeCtxEntry.accountId);
+          activeCtxEntry = null;
+          ctxEntry = null;
+          clearContextForAccountRetry(chatBody);
+        }
+      }
+      if (AUTO_SESSION && !lease) lease = accountPool.lease(model, { excludeIds: [...excludedAccounts], owner: chatBody.__requestId || '' });
+      const bound = lease ? lease.account : await getSession().catch(() => null);
+      if (!bound) {
+        throw Object.assign(new Error('no active Sakana account'), { errorCode: 'AUTH-LOGIN-001', status: 503 });
+      }
+
+      try {
+        const requestStore = { session: bound, lease, ctxEntry: activeCtxEntry };
+        const result = await als.run(requestStore, () => makeChatResponseInner(chatBody));
+        if (result && typeof result[Symbol.asyncIterator] === 'function') {
+          slotTransferred = true;
+          return (async function* () {
+            let ok = true;
+            let streamError = null;
+            try {
+              for (;;) {
+                const step = await als.run(requestStore, () => result.next());
+                if (step.done) break;
+                const err = step.value?.data?.error;
+                if (err) {
+                  ok = false;
+                  streamError = err;
+                }
+                yield step.value;
+              }
+            } catch (err) {
+              ok = false;
+              streamError = { code: err.errorCode || err.code || 'STREAM-ERROR', message: String(err.message || err) };
+              throw err;
+            } finally {
+              try { await als.run(requestStore, () => result.return?.()); } catch {}
+              if (!ok && streamError?.code) markCurrentSession({ errorCode: streamError.code, message: streamError.message }, lease);
+              if (lease) accountPool.releaseLease(lease, ok, { error: streamError?.message || '' });
+              concurrencyManager.release();
+            }
+          })();
+        }
+        const ok = !result?.error;
+        if (lease) accountPool.releaseLease(lease, ok, { error: result?.error || '' });
+        return result;
+      } catch (err) {
+        if (lease) accountPool.releaseLease(lease, false, { error: err.message || err });
+        const code = String(err?.errorCode || err?.code || '');
+        const modelQuota = code.startsWith('RATE-MODEL');
+        const retryable = isRetryableAccountError(err);
+        if (retryable && !modelQuota && lease) markCurrentSession(err, lease);
+        if (retryable && attempt < (modelQuota ? 2 : 1)) {
+          if (lease?.accountId) excludedAccounts.add(lease.accountId);
+          activeCtxEntry = null;
+          ctxEntry = null;
+          clearContextForAccountRetry(chatBody);
+          console.log('[makeChatResponse] retrying with fresh account (' + (code || err.message) + ')');
+          continue;
+        }
+        throw err;
+      }
+    }
+  } finally {
+    if (!slotTransferred) concurrencyManager.release();
   }
 }
 
@@ -811,10 +1207,21 @@ async function makeChatResponseInner(chatBody) {
   const raw = JSON.stringify(chatBody);
   let body;
   try { body = JSON.parse(raw); } catch { throw new Error('bad chat body'); }
+  for (const key of ['__forceNewContext', '__ignoreExplicitContext', '__contextRebuildAttempted', '__contextSnapshot', '__normalizedRequest']) {
+    if (chatBody[key] !== undefined) body[key] = chatBody[key];
+  }
 
   // auto-stream: for legacy/responses we must decide immediately, so force non-stream here
   // unless the caller wants raw SSE (handled below).
-  const sakanaReq = openaiRequestToSakana(body);
+  const normalized = chatBody.__normalizedRequest || await normalizeRequestBody(chatBody);
+  const contextSnapshot = chatBody.__contextSnapshot || makeContextSnapshot(normalized);
+  const ctxEntry = als.getStore()?.ctxEntry || null;
+  const assembled = buildNormalizedSakanaRequest(body, normalized, ctxEntry);
+  const sakanaReq = assembled.sakanaReq;
+  const normalizedPrompt = assembled.normalizedPrompt;
+  const effectiveNormalized = assembled.normalized;
+  sakanaReq.messageFingerprint = effectiveNormalized.fingerprint || normalized.fingerprint;
+  sakanaReq.contextSnapshot = contextSnapshot;
   injectRpRules(sakanaReq, { headers: {} }, body);
   const modelName = body.model || 'sakana-namazu';
   const streaming = body.stream === true ? true : false;
@@ -826,8 +1233,12 @@ async function makeChatResponseInner(chatBody) {
   if (sakanaReq.files && sakanaReq.files.length > 0) {
     const textParts = [];
     const remaining = [];
-    for (const f of sakanaReq.files) {
-      const ext = extractFileContent(f);
+      for (const f of sakanaReq.files) {
+        if (f.name === 'context_document.txt') {
+          remaining.push(f);
+          continue;
+        }
+        const ext = extractFileContent(f);
       if (ext === null) { remaining.push(f); }
       else if (ext.text) { textParts.push(ext.text); }
     }
@@ -837,7 +1248,8 @@ async function makeChatResponseInner(chatBody) {
     }
   }
 
-  const cacheKey = CACHE_ENABLED ? cache.key(body) : null;
+  const cacheable = CACHE_ENABLED && !sakanaReq.isToolTurn && !(sakanaReq.tools && sakanaReq.tools.length) && !(sakanaReq.files && sakanaReq.files.some((f) => f && f.output));
+  const cacheKey = cacheable ? cache.key(body, { semanticFingerprint: sakanaReq.messageFingerprint, normalized: sakanaReq.normalizedMessages }) : null;
   if (cacheKey && !streaming) {
     const cached = cache.get(cacheKey);
     if (cached) {
@@ -847,10 +1259,10 @@ async function makeChatResponseInner(chatBody) {
   }
 
   let conversationId = sakanaReq.conversationId;
-  let lastMessageId = '';
+  let lastMessageId = ctxEntry?.lastMessageId || '';
 
   // Auto-context lookup — same first-user-message key as saveContext.
-  if (!conversationId) {
+  if (!conversationId && !body.__forceNewContext && !body.__ignoreExplicitContext) {
     const found = (als.getStore() && als.getStore().ctxEntry) || (firstUserText(body) ? lookupContext(firstUserText(body)) : null);
     if (found) {
       conversationId = found.conversationId;
@@ -872,18 +1284,19 @@ async function makeChatResponseInner(chatBody) {
     conversationId = boot.conversationId;
     stats.convCreated();
     lastMessageId = boot.systemMessageId;
-  } else {
+  } else if (!lastMessageId) {
     lastMessageId = await upstream.getLastMessageId(conversationId);
   }
 
   const upResp = await upstream.streamGenerate(conversationId, sakanaReq, { lastMessageId });
-  const t = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
+  let t = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
 
   if (streaming) {
     // Return SSE chunk generator, mirroring chat path but as async iterable.
     const base = { id: t.assistantMessageId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: modelName };
     return (async function* () {
       let streamError = null;
+      let streamErrCode = null;
       try {
         for await (const ev of drainRoundToSSE(upResp, t, base)) yield ev;
         // Native tool round with no text: continue transparently.
@@ -892,6 +1305,7 @@ async function makeChatResponseInner(chatBody) {
           rounds++;
           const contT = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
           const leaf = await upstream.getLastMessageId(conversationId);
+          lastMessageId = leaf;
           const contReq = { ...sakanaReq, isContinue: true, prompt: undefined, files: [] };
           const contResp = await upstream.streamGenerate(conversationId, contReq, { lastMessageId: leaf });
           for await (const ev of drainRoundToSSE(contResp, contT, base)) yield ev;
@@ -910,11 +1324,14 @@ async function makeChatResponseInner(chatBody) {
           yield { event: 'chat.completion.chunk', data };
         }
       } catch (e) {
-        const fb = { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'error' }], error: { message: String(e.message || e), code: 'STREAM-ERROR' } };
+        const code = e.errorCode || e.code || 'STREAM-ERROR';
+        streamError = String(e.message || e);
+        streamErrCode = code;
+        const fb = { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'error' }], error: { message: streamError, code } };
         yield { event: 'chat.completion.chunk', data: fb };
       }
       stats.finish({ stream: true, ok: !streamError, model: modelName, promptChars, completionChars: 0, keyId: null });
-      saveContext(firstUserText(body) || lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+      const finalLeaf = await finalizeContext(body, normalized, conversationId, lastMessageId, { headers: {} }, contextSnapshot);
       auditEntry({ method: 'POST', url: '/v1/responses', headers: {} }, body, streamError ? 500 : 200, null, streamError, Date.now() - start);
     })();
   }
@@ -932,7 +1349,8 @@ async function makeChatResponseInner(chatBody) {
       const cont = await continueNativeToolRound(conversationId, sakanaReq);
       text += cont.content;
       reasoning += cont.reasoning;
-      finalT = cont.t;
+          finalT = cont.t;
+          lastMessageId = cont.leaf || lastMessageId;
     } catch (e) { console.log('[tool-continue] (responses) continue round failed:', String(e.message || e).slice(0, 120)); break; }
   }
   text = stripChips(text).trim();
@@ -940,14 +1358,14 @@ async function makeChatResponseInner(chatBody) {
   // of 200 OK with no content (user reported "no reply with no error").
   if (!text) {
     stats.finish({ stream: false, ok: false, error: 'empty upstream response', model: modelName, promptChars, completionChars: 0, keyId: null });
-    saveContext(firstUserText(body) || lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
-    auditEntry({ method: 'POST', url: '/v1/responses', headers: {} }, body, 200, { error: 'empty upstream response' }, null, Date.now() - start);
+      const finalLeaf = await finalizeContext(body, normalized, conversationId, lastMessageId, { headers: {} }, contextSnapshot);
+      auditEntry({ method: 'POST', url: '/v1/responses', headers: {} }, body, 200, { error: 'empty upstream response' }, null, Date.now() - start);
     return { content: '', reasoning, conversationId, promptTokens: 0, completionTokens: 0, error: 'empty upstream response' };
   }
   const promptTokens = Math.round(promptChars / 4);
   const completionTokens = Math.round((text.length + reasoning.length) / 4);
   stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: null });
-  saveContext(firstUserText(body) || lastUserText(body) || sakanaReq.prompt, conversationId, lastMessageId);
+  const finalLeaf = await finalizeContext(body, normalized, conversationId, lastMessageId, { headers: {} }, contextSnapshot);
   const entry = auditEntry({ method: 'POST', url: '/v1/responses', headers: {} }, body, 200, { content: text.slice(0, 200) }, null, Date.now() - start);
   // 客户端工具调用(JSON 提取,原生沙盒调用已被抑制)随聚合返回,供
   // Anthropic 端点组装 tool_use 块
@@ -1021,48 +1439,105 @@ const server = http.createServer(async (req, res) => {
       if (groute) return await handleGeminiGenerate(req, res, groute, url);
     }
     if (req.method === 'GET' && p === '/v1/conversations') {
+      let lease = null;
       try {
-        const list = await upstream.listConversations(url.searchParams.get('p') || 0);
+        const session = AUTO_SESSION
+          ? (lease = accountPool.lease('', { owner: 'conversation-list' }))?.account
+          : await getSession().catch(() => null);
+        if (!session) return sendJson(res, 503, { error: { message: 'conversation account unavailable', type: 'upstream_error', code: 'AUTH-LOGIN-001' } });
+        const list = await als.run({ session, lease, ctxEntry: null }, () =>
+          upstream.listConversations(url.searchParams.get('p') || 0)
+        );
         return sendJson(res, 200, list);
-      } catch (e) { return sendJson(res, 500, { error: { message: String(e.message) } }); }
+      } catch (e) {
+        return sendJson(res, 500, { error: { message: String(e.message) } });
+      } finally {
+        if (lease) accountPool.releaseLease(lease, true);
+      }
     }
     if (req.method === 'GET' && p.startsWith('/v1/conversations/') && p.endsWith('/messages')) {
       const id = decodeURIComponent(p.slice('/v1/conversations/'.length, -'/messages'.length));
+      let lease = null;
+      let ok = false;
       try {
-        const conv = await upstream.getConversation(id);
+        const ctxEntry = contextStore.getByConversationId(id);
+        let session;
+        if (AUTO_SESSION) {
+          if (!ctxEntry?.accountId) {
+            return sendJson(res, 409, { error: { message: 'conversation account affinity unavailable', type: 'conflict', code: 'CONTEXT-AFFINITY-MISSING' } });
+          }
+          const acct = accountPool.get(ctxEntry.accountId);
+          lease = acct ? accountPool.leaseAccount(acct.id, '', { owner: 'conversation:' + id }) : null;
+          session = lease?.account || null;
+        } else {
+          session = await getSession().catch(() => null);
+        }
+        if (!session) return sendJson(res, 404, { error: { message: 'conversation account unavailable', type: 'not_found', code: 'CONTEXT-AFFINITY-MISSING' } });
+        const conv = await als.run({ session, lease, ctxEntry }, () => upstream.getConversation(id));
+        ok = true;
         return sendJson(res, 200, conv);
-      } catch (e) { return sendJson(res, 500, { error: { message: String(e.message) } }); }
+      } catch (e) {
+        return sendJson(res, 500, { error: { message: String(e.message) } });
+      } finally {
+        if (lease) accountPool.releaseLease(lease, ok, { error: ok ? '' : 'conversation read failed' });
+      }
     }
     // Stop an in-flight generation (used by the chat panel's stop button).
     // Route to the account that owns the conversation via the context store.
     if (req.method === 'POST' && p.startsWith('/v1/conversations/') && p.endsWith('/stop')) {
+      const id = decodeURIComponent(p.slice('/v1/conversations/'.length, -'/stop'.length));
+      let lease = null;
+      let ok = false;
       try {
-        const id = decodeURIComponent(p.slice('/v1/conversations/'.length, -'/stop'.length));
-        const ctxEntry = contextStore.lookup('id:' + id);
-        const acct = (ctxEntry && ctxEntry.accountId) ? accountPool.get(ctxEntry.accountId) : null;
-        await als.run({ session: acct }, () => upstream.stopGeneration(id));
+        const ctxEntry = contextStore.getByConversationId(id);
+        let session;
+        if (AUTO_SESSION) {
+          if (!ctxEntry?.accountId) {
+            return sendJson(res, 404, { error: { message: 'conversation account unavailable', type: 'not_found', code: 'CONTEXT-AFFINITY-MISSING' } });
+          }
+          const acct = accountPool.get(ctxEntry.accountId);
+          lease = acct ? accountPool.leaseAccount(acct.id, '', { owner: 'stop:' + id }) : null;
+          session = lease?.account || null;
+        } else {
+          session = await getSession().catch(() => null);
+        }
+        if (!session) return sendJson(res, 404, { error: { message: 'conversation account unavailable', type: 'not_found' } });
+        await als.run({ session, lease, ctxEntry }, () => upstream.stopGeneration(id));
+        ok = true;
         return sendJson(res, 200, { ok: true });
       } catch (e) {
         // Stop is best-effort — the client already detached; never 5xx it.
         return sendJson(res, 200, { ok: true, note: String(e.message || e).slice(0, 80) });
+      } finally {
+        if (lease) accountPool.releaseLease(lease, ok, { error: ok ? '' : 'stop failed' });
       }
     }
 
     // Management endpoints
     if (req.method === 'GET' && p === '/api/stats') {
       let session = null;
-      try { session = JSON.parse(fs.readFileSync(path.join(__dirname, 'session.json'), 'utf8')); } catch {}
+      try { session = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch {}
       const s = stats.snapshot(session);
       s.cache = cache.stats();
       const mem = process.memoryUsage();
-      const poolList = accountPool.accounts;
+      const pool = accountPool.snapshot();
       s.accounts = {
-        total: poolList.length,
-        active: accountPool.activeCount(),
-        limited: poolList.filter(a => a.state === 'rate_limited').length,
-        expired: poolList.filter(a => a.state === 'expired').length,
-        max: accountPool.maxPool,
-        inFlight: poolList.reduce((n, a) => n + (a.inFlight || 0), 0),
+        total: pool.total,
+        active: pool.active,
+        limited: pool.limited,
+        expired: pool.expired,
+        max: pool.max,
+        inFlight: pool.inFlight,
+        stale: pool.stale,
+        target: pool.target,
+        targetMet: pool.targetMet,
+        replenishing: pool.replenishing,
+        refreshing: pool.refreshing,
+        leaseCount: pool.leaseCount,
+        oldestLeaseAgeMs: pool.oldestLeaseAgeMs,
+        lastHarvestAt: pool.lastHarvestAt,
+        lastHarvestErrorAt: pool.lastHarvestErrorAt,
+        telemetry: pool.telemetry,
       };
       s.auditCount = auditLog.length;
       s.ops = {
@@ -1070,6 +1545,7 @@ const server = http.createServer(async (req, res) => {
         contextCount: contextStore.size,
         uptimeSec: Math.floor((Date.now() - stats.startedAt) / 1000),
         mem: { rssMB: Math.round(mem.rss / 1048576), heapMB: Math.round(mem.heapUsed / 1048576), heapMaxMB: Math.round(mem.heapTotal / 1048576) },
+        compact: { ...contextTelemetry },
         browser: autoSession.status(),
         node: process.version,
         authMode: (API_KEY || keyStore.keys.some(k => !k.revoked)) ? 'keyed' : 'open',
@@ -1137,28 +1613,21 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/api/accounts') {
       if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
       accountPool._checkCooldowns();
-      const safe = accountPool.accounts.map(a => ({
-        id: a.id,
-        email: a.email || '',
-        uid: a.uid || '',
-        display: a.display || '',
-        state: a.state || 'active',
-        inFlight: a.inFlight || 0,
-        successCount: a.successCount || 0,
-        errorCount: a.errorCount || 0,
-        refreshes: a.refreshes || 0,
-        savedAt: a.savedAt || 0,
-        cookieCount: (a.cookies || []).length,
-        rateLimitedAt: a.rateLimitedAt || 0,
-      }));
+      const safe = accountPool.accounts.map(a => accountPool.safeAccount(a));
+      const pool = accountPool.snapshot();
       return sendJson(res, 200, {
         accounts: safe,
-        total: accountPool.count(),
-        active: accountPool.activeCount(),
-        target: accountPool.minPool,
-        max: accountPool.maxPool,
-        lastHarvestAt: accountPool.lastHarvestAt,
-        lastHarvestError: accountPool.lastHarvestError,
+        total: pool.total,
+        active: pool.active,
+        target: pool.target,
+        max: pool.max,
+        lastHarvestAt: pool.lastHarvestAt,
+        lastHarvestError: pool.lastHarvestError,
+        lastHarvestErrorAt: pool.lastHarvestErrorAt,
+        replenishing: pool.replenishing,
+        refreshing: pool.refreshing,
+        telemetry: pool.telemetry,
+        persistenceError: pool.persistenceError,
       });
     }
 
@@ -1166,7 +1635,6 @@ const server = http.createServer(async (req, res) => {
       if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
       try {
         if (AUTO_SESSION) {
-          // Serialized fresh harvest + full replenish to the 20-account target.
           accountPool.ensureMinPool(() => autoSession.harvestFresh())
             .then((ok) => console.log(`[accounts] manual refresh harvested ${ok} accounts`))
             .catch((e) => console.log('[accounts] manual refresh error:', String(e.message || e).slice(0, 150)));
@@ -1246,28 +1714,30 @@ server.listen(PORT, HOST, async () => {
   console.log(`models: ${MODELS.length}`);
 
   if (AUTO_SESSION) {
+    setReloadHandler(() => autoSession.refreshSessionLocked());
     console.log('[startup] AUTO_SESSION enabled — auto-bypassing CF 5s shield…');
     try {
-      const s = await autoSession.start();
+      const s = await autoSession.start({ managedByPool: true });
       console.log(`[startup] Session ready: ${s.cookieHeader ? s.cookieHeader.split(';').length + ' cookies' : 'no cookies'}`);
-      if (s) accountPool.add(s);
+      if (s) accountPool.upsert(s);
       console.log(`[account-pool] pool: ${accountPool.count()} accounts (${accountPool.activeCount()} active)`);
     } catch (e) {
       console.log(`[startup] Auto-session failed: ${e.message}. Falling back to session.json.`);
       loadSession();
     }
     // Background keeper MUST run regardless of the bootstrap outcome: it
-    // refreshes cookies and replenishes the pool to minPool (20) with fresh
+    // refreshes cookies and replenishes the pool to minPool with fresh
     // accounts. Only autoSession functions are gated by AUTO_SESSION.
     accountPool.startBackground({
       harvestFn: () => autoSession.harvestFresh(),
       refreshFn: (acct) => autoSession.refreshAccount(acct),
     });
-    console.log(`[account-pool] background keeper started (refresh every ${String(process.env.ACCOUNT_REFRESH_MS || '20min')}, replenish every ${String(process.env.ACCOUNT_REPLENISH_MS || '90s')}, target ${accountPool.minPool})`);
+    console.log(`[account-pool] background keeper started (refresh every ${String(process.env.ACCOUNT_REFRESH_MS || '1200000')}ms, replenish every ${String(process.env.ACCOUNT_REPLENISH_MS || '90000')}ms, target ${accountPool.minPool})`);
     // Kick off an immediate replenish instead of waiting a full cycle.
     accountPool.ensureMinPool(() => autoSession.harvestFresh())
       .catch(e => console.log('[startup] pool replenish:', e.message));
   } else {
+    setReloadHandler(null);
     const s = loadSession();
     console.log(`session: ${s.cookieHeader ? 'loaded (' + s.cookieHeader.split(';').length + ' cookies)' : 'NOT LOADED — run scripts/harvest.mjs'}`);
   }

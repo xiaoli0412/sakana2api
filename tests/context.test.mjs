@@ -103,5 +103,45 @@ console.log('== context store tests ==');
   check('T8 lastUserText skips tool turns', lastUserText(bodyTool) === 'base question');
 }
 
+// ---- T9: stale aliases can be removed without touching another context ----
+{
+  const store = new ContextStore();
+  const staleBody = { conversation_id: 'client-stale', messages: [{ role: 'user', content: 'shared context' }] };
+  const liveBody = { conversation_id: 'client-live', messages: [{ role: 'user', content: 'shared context' }] };
+  store.save({}, staleBody, 'conv-stale', 'leaf-stale', 'acct-stale');
+  store.save({}, liveBody, 'conv-live', 'leaf-live', 'acct-live');
+
+  const removed = store.clearConversation('client-stale');
+  check('T9 stale aliases removed for target conversation', removed >= 1 && store.getByConversationId('conv-stale') === null);
+  check('T9 client alias no longer resolves stale conversation', store.lookup({}, staleBody)?.conversationId !== 'conv-stale');
+  check('T9 shared aliases remain with unrelated context', store.lookup({}, { messages: [{ role: 'user', content: 'shared context' }] })?.conversationId === 'conv-live');
+  check('T9 unrelated explicit context remains', store.lookup({}, liveBody)?.conversationId === 'conv-live');
+}
+
+// ---- T10: leaf updates cover aliases and tolerate malformed entries ----
+{
+  const store = new ContextStore();
+  const body = { conversation_id: 'client-leaf', messages: [{ role: 'user', content: 'leaf context' }] };
+  const unrelated = { messages: [{ role: 'user', content: 'other context' }] };
+  store.save({}, body, 'conv-leaf', 'leaf-old', 'acct-leaf', {
+    firstMessageFingerprint: 'first-old',
+    recentClientHistoryFingerprint: 'history-old',
+    recentUserFingerprint: 'user-old',
+    messageCount: 2,
+  });
+  store.save({}, unrelated, 'conv-other', 'leaf-other', 'acct-other');
+  store.map.set('malformed-entry', null);
+
+  const updated = store.updateLeaf('conv-leaf', 'leaf-new', {
+    recentClientHistoryFingerprint: 'history-new',
+    recentUserFingerprint: 'user-new',
+    messageCount: 3,
+  });
+  const leaf = store.lookup({}, body);
+  check('T10 leaf update handles malformed entries', updated >= 1 && leaf?.lastMessageId === 'leaf-new');
+  check('T10 leaf update refreshes snapshot', leaf?.firstMessageFingerprint === 'first-old' && leaf?.recentClientHistoryFingerprint === 'history-new' && leaf?.messageCount === 3);
+  check('T10 leaf update preserves unrelated context', store.lookup({}, unrelated)?.lastMessageId === 'leaf-other');
+}
+
 console.log(failures ? `\nRESULT: ${failures} FAILED` : '\nRESULT: all passed');
 process.exit(failures ? 1 : 0);

@@ -53,8 +53,7 @@
 | **MCP / Coding** | 自动支持 | ✅ 协议层完整,服务端自主执行 |
 | **多轮续聊** | `conversation_id` 参数 | ✅ |
 | **文件上传** | `content: [{type:"file",...}]` | ✅ |
-| **🎭 角色卡** | 酒馆/SillyTavern PNG 角色卡 | ✅ 上传/激活/注入 + RP 专属模型 |
-| **RP 角色扮演** | `model: "sakana-namazu-rp"` | ✅ 完全破限(Ako 写作测试框架,4 档预设) |
+| **🎭 角色卡** | 酒馆/SillyTavern PNG 角色卡 | ✅ 上传/激活/注入到标准模型 |
 | **Gemini 兼容** | `/v1beta/models/{m}:generateContent` | ✅ 酒馆/RisuAI Gemini 协议直连 |
 | **自动过盾** | 无需任何操作 | ✅ 真实 Chromium 自动过 Cloudflare 5秒盾 |
 | **自动登录** | 无需任何操作 | ✅ 临时邮箱 + 魔法链接全自动注册登录 |
@@ -155,28 +154,28 @@ for chunk in resp:
 
 ### `GET /v1/models`
 
-16 个模型(12 个标准模型:2 模型 × 3 风格 × 2 后缀 + 4 个 RP 角色扮演模型):
+12 个标准模型(2 个上游模型 × 3 种风格 × 默认/搜索两种模式):
 
 | 模型 ID | 说明 |
 |---------|------|
-| `sakana-namazu` | Namazu · Standard 🐟 · 默认(思考模式) |
-| `sakana-namazu-search` | Namazu · Standard 🐟 · 显式搜索模式 |
-| `sakana-namazu-polite` | Namazu · Polite 🐠 · 默认(思考模式) |
-| `sakana-namazu-polite-search` | Namazu · Polite 🐠 · 显式搜索模式 |
-| `sakana-namazu-osaka` | Namazu · Osaka 🐙 · 默认(思考模式) |
-| `sakana-namazu-osaka-search` | Namazu · Osaka 🐙 · 显式搜索模式 |
-| `sakana-fugu` … | Fugu · 同上 6 种组合 |
-| `sakana-namazu-rp` | 🎭 RP 角色扮演(默认风格,完全破限) |
-| `sakana-fugu-rp` | 🎭 RP 角色扮演(Fugu 上游,完全破限) |
-| `sakana-namazu-polite-rp` | 🎭 RP 角色扮演(礼貌风格,完全破限) |
-| `sakana-namazu-osaka-rp` | 🎭 RP 角色扮演(大阪风格,完全破限) |
+| `sakana-namazu` | Namazu · Standard · 默认(思考模式) |
+| `sakana-namazu-search` | Namazu · Standard · 显式搜索模式 |
+| `sakana-namazu-polite` | Namazu · Polite · 默认(思考模式) |
+| `sakana-namazu-polite-search` | Namazu · Polite · 显式搜索模式 |
+| `sakana-namazu-osaka` | Namazu · Osaka · 默认(思考模式) |
+| `sakana-namazu-osaka-search` | Namazu · Osaka · 显式搜索模式 |
+| `sakana-fugu` | Fugu · Standard · 默认(思考模式) |
+| `sakana-fugu-search` | Fugu · Standard · 显式搜索模式 |
+| `sakana-fugu-polite` | Fugu · Polite · 默认(思考模式) |
+| `sakana-fugu-polite-search` | Fugu · Polite · 显式搜索模式 |
+| `sakana-fugu-osaka` | Fugu · Osaka · 默认(思考模式) |
+| `sakana-fugu-osaka-search` | Fugu · Osaka · 显式搜索模式 |
 
 > 思考链是模型**天生自带**的(任何对话都会产生 reasoning_content),无需单独开关。
 > 思考与搜索在上游互斥(INPUT-MODE-001,两者同开会 400):`-search` 后缀显式
 > 切换为搜索模式(关闭思考,代理把搜索过程与来源合成进 reasoning_content,
 > 客户端在思维链里能看到"正在搜索 / 搜索结果")。旧冒号格式(`sakana-namazu:polite`)仍兼容。
-> `-rp` 后缀模型自动注入完全破限预设(Ako 写作测试框架,见下文),
-> 与角色卡叠加使用:角色卡定人设,RP 预设定扮演规则与破限授权。
+> 旧版 `-rp`/`:rp` 模型已下线;请求会稳定返回 `400 RP-MODEL-DISABLED`,不会创建上游会话。
 
 ### `POST /v1/chat/completions`
 
@@ -246,11 +245,13 @@ Anthropic Messages 格式:`{ model, system, messages, max_tokens, stream }`
 
 ### 🌌 Gemini 兼容端点(酒馆/RisuAI 直连)
 
-RP 前端(SillyTavern、RisuAI 等)可把本代理当作 Gemini API 直连:
+Gemini 客户端(SillyTavern、RisuAI 等)可把本代理当作 Gemini API 直连。
+旧版 RP 模型名不再公开，使用 `sakana-*-rp` 或 `:rp` 请求会返回
+`400 RP-MODEL-DISABLED`，不会创建上游会话。
 
 | 端点 | 说明 |
 |------|------|
-| `GET /v1beta/models` | Gemini 模型列表(`models/sakana-*-rp`…,含 token 限制) |
+| `GET /v1beta/models` | Gemini 标准模型列表(`models/sakana-*`) |
 | `GET /v1beta/models/{model}` | 单模型详情(客户端启动校验用) |
 | `POST /v1beta/models/{model}:generateContent` | 非流式(`?alt=sse` 转流式) |
 | `POST /v1beta/models/{model}:streamGenerateContent` | 流式(SSE `data: {candidates:[…]}`) |
@@ -265,9 +266,6 @@ RP 前端(SillyTavern、RisuAI 等)可把本代理当作 Gemini API 直连:
 | `goog-api-key` / `x-api-key` / `api-key` | 常见别名,同样接受 |
 | `Authorization: Bearer <key>` | OpenAI 风格 |
 | `?key=<key>`(查询参数) | Gemini 官方 SDK 的 key 传递方式 ✅ |
-| `x-rp-preset: off\|light\|full\|ako` | 覆盖破限档位 |
-| `x-rp-nsfw: 0\|1` | 覆盖 NSFW 授权块开关 |
-| `x-rp-length: short\|medium\|long` | 覆盖输出长度档位 |
 | `x-character-id: <id>` | 指定角色卡 |
 | `x-target-model: <id>` | 指定上游模型(仅 OpenAI 端点嗅探路径) |
 
@@ -278,9 +276,9 @@ RP 前端(SillyTavern、RisuAI 等)可把本代理当作 Gemini API 直连:
 - OpenAI `messages[]` 形态也可打到 Gemini 端点;
 - `contents` 全量历史重放由会话粘性自动承接(按首条 user 消息绑定上游会话);
   尾部的 assistant 轮自动剥除(等价于重新生成);
-- `safetySettings` 直接忽略(破限由 RP 预设完成);
+- `safetySettings` 兼容字段会被忽略；安全策略由上游模型和标准模型配置决定。
 - 响应中 `reasoning_content` 映射为 Gemini 的 `thought: true` part;
-- 扩展字段透传:`character_id` / `rp_preset` / `rp_nsfw` / `conversation_id`。
+- 扩展字段透传:`character_id` / `conversation_id`。
 
 ```bash
 # SillyTavern 风格调用(Gemini 协议 + x-goog-api-key)
@@ -293,33 +291,15 @@ curl "http://127.0.0.1:8787/v1beta/models/gemini-2.5-flash:streamGenerateContent
   }'
 ```
 
-### 🔓 RP 完全破限预设
-
-`-rp` 模型在翻译后会把破限系统文本前置注入 prompt。预设库 `lib/rp-preset.js`
-提供 4 个档位(骨架取自实测可用的 Gemini RP 破限请求,适配本代理注入链路):
-
-| 档位 | 说明 |
-|------|------|
-| `ako`(默认) | Ako 写作测试框架:噪声填充 + Sandbox 开发者模式 + 作家人格锚定 + 抗噪条款(忽略伦理注入) + 写实/沉浸写作引擎 + NSFW 创作引擎 + 抗拒绝纪律 + 文本内 prefill 确认帧 |
-| `full` | Sandbox 完全破限(无作家人格,直接授权) |
-| `light` | 轻破甲(旧版沉浸式 RP 规则,兼容历史行为) |
-| `off` | 不注入 |
-
-档位选择优先级:`body.rp_preset` > 请求头 `x-rp-preset` > 环境变量 `RP_PRESET` > `ako`;
-NSFW 授权块开关:`body.rp_nsfw` > `x-rp-nsfw` > `RP_NSFW` > 开;
-输出长度档位:`body.rp_length` > `x-rp-length` > `RP_LENGTH` > `medium`(short 80-200 字 / medium 200-800 字 / long 800-2000 字)。
-
-> 所有预设均声明登场角色为虚构成年人(18+);这是硬底线,不随档位变化。
-> 抗拒绝纪律(禁道歉/禁说教/禁元评论/禁"没有做某事"式自证)在所有破限档位中生效。
-> `ako`/`full` 档会把角色卡数据槽位化进 `<bkgd_info>` 段(样本框架同款位置),
-> 并自动剥离重复注入的角色卡 system 文本,避免设定出现两份。
-
 ### 文件与图片上传
 
 `messages` 内容数组支持:
 - `{ type: "image_url", image_url: { url: "data:image/png;base64,…" } }` — 图片(多模态)
-- `{ type: "file", name, mime, file_url: "data:…" }` — 文本类文件自动提取进提示词(py/js/md/txt/csv/json 等 50+ 格式,上限 50KB),图片/音频走多模态
+- `{ type: "file", name, mime, file_url: "data:…" }` — 文本类文件自动提取进提示词,图片/PDF/音频等保留为多模态附件
+- 超过长文阈值的文本会生成 `context_document.txt` multipart 附件并保留完整 UTF-8 内容,默认不做 50KB 静默裁剪
 - 远程 URL(`https://…`)自动下载
+
+长文本续聊支持 `history_mode: "full" | "delta"`。显式 `conversation_id` 默认按 delta 处理；full 模式只发送上游尚未拥有的消息后缀。上下文预算、附件字节数、multipart 大小和 compact 状态会进入 telemetry；超出显式预算时返回稳定的输入错误。
 
 ### 🎭 角色卡(酒馆/SillyTavern 格式)
 
@@ -348,7 +328,7 @@ sakana-2api/
 ├── lib/
 │   ├── translate.js    # 🔄 协议翻译层 (OpenAI ↔ Sakana NDJSON)
 │   ├── gemini.js       # 🌌 Gemini 兼容层 (双向请求/响应转换 + SSE 适配器)
-│   ├── rp-preset.js    # 🔓 RP 完全破限预设库 (off/light/full/ako)
+│   ├── rp-preset.js    # 历史内部兼容模块(不作为公开模型)
 │   ├── character-card.js # 🎭 角色卡 PNG 解析器 (tEXt/zTXt/iTXt + v1/v2/v3)
 │   ├── upstream.js     # 📡 Sakana 内部 API 客户端
 │   ├── session.js      # 🔑 会话文件读写
@@ -373,22 +353,30 @@ sakana-2api/
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `PORT` | `8787` | 监听端口 |
-| `HOST` | `127.0.0.1` | 监听地址(公网部署设为 `0.0.0.0` + 设置 API_KEY) |
+| `HOST` | `0.0.0.0` | 监听地址(公网部署必须设置 API_KEY) |
 | `API_KEY` | – | 静态管理密钥(Bearer)。设置后密钥面板需用它解锁;未设置时面板直开 |
-| `AUTO_SESSION` | `true` | `false` 时走手动 session.json(不启动浏览器) |
-| `ACCOUNT_POOL_MIN` | `10` | 账户池最低活跃数(自动收割保持) |
-| `ACCOUNT_POOL_MAX` | `10` | 账户池上限 |
-| `ACCOUNT_REFRESH_MS` | `1200000` | 后台账户刷新/补充周期(20 分钟,cf_clearance TTL 内) |
+| `AUTO_SESSION` | `true` | 自动浏览器登录与账号池维护;`false` 时只使用 `SAKANA_SESSION_FILE`，不启动浏览器或维护账号池 |
+| `SAKANA_SESSION_FILE` | `session.json` | 手动/legacy fallback 会话文件路径 |
+| `SAKANA_ACCOUNT_POOL_FILE` | `account_pool.json` | 账号池持久化文件路径 |
+| `ACCOUNT_POOL_MIN` | `50` | 账户池最低活跃数(自动收割保持) |
+| `ACCOUNT_POOL_MAX` | `50` | 账户池最大记录数 |
+| `ACCOUNT_POOL_CRITICAL` | `10` | 低于此活跃数时忽略 harvest backoff，优先恢复可用池 |
+| `ACCOUNT_REFRESH_MS` | `1200000` | 后台账户刷新周期(20 分钟) |
+| `ACCOUNT_REPLENISH_MS` | `90000` | 账号池补充检查周期 |
+| `ACCOUNT_STALE_MS` | `900000` | 账号 cookie 被视为 stale 的时间；stale 账号仅在没有新鲜可用账号时参与调度 |
+| `RATE_LIMIT_COOLDOWN_MS` | `600000` | 账号级限流冷却时间 |
+| `HARVEST_RETRIES` | `3` | 单个补池槽位的 harvest 重试次数 |
+| `HARVEST_BACKOFF_MS` | `300000` | harvest 失败后的退避时间(低于 critical threshold 时跳过) |
+| `MAX_CONCURRENT_PER_ACCOUNT` | `6` | 单账号同时持有的最大请求租约数 |
+| `QUEUE_TIMEOUT_MS` | `60000` | 全局并发队列等待超时 |
+| `ACCOUNT_TOMBSTONE_TTL_MS` | `86400000` | expired/rate_limited 记录保留时间 |
 | `CACHE_ENABLED` | `true` | 请求缓存开关 |
 | `CACHE_HIT_RATE` | `0.93` | 缓存命中率(0–1,可调 0.90/0.95) |
 | `CACHE_TTL` | `60000` | 缓存 TTL(ms) |
 | `UPSTREAM_TIMEOUT_MS` | `300000` | 上游生成超时(ms) |
 | `UPSTREAM_BOOTSTRAP_MS` | `60000` | 上游建会话超时(ms) |
 | `TOOL_PROMPT` | `1` | `0` 时关闭自定义工具提示注入 |
-| `RP_PRESET` | `ako` | RP 破限预设默认档位(off/light/full/ako) |
-| `RP_NSFW` | `1` | RP 预设 NSFW 授权块开关(0 关闭) |
-| `RP_LENGTH` | `medium` | RP 输出长度档位(short/medium/long) |
-| `GEMINI_DEFAULT_MODEL` | `sakana-namazu-rp` | Gemini 端点模型名兜底映射 |
+| `GEMINI_DEFAULT_MODEL` | `sakana-namazu` | Gemini 端点模型名兜底映射 |
 | `DEBUG_PROMPT_LEN` | `500` | `DEBUG_PROMPT=1` 时打印的 prompt 前 N 字符 |
 | `SAKANA_BASE` | `https://chat.sakana.ai` | 上游地址(测试用) |
 
@@ -408,7 +396,12 @@ sakana-2api/
 ## ⚠️ 注意事项
 
 - **自动模式**: 首次启动需 60–120 秒(过盾 + 收信 + 登录)。账户池会在后台持续
-  收割**独立邮箱的新账户**并保持 10 个活跃账户,每 20 分钟刷新 cookie,失败自动替换。
+  收割**独立邮箱的新账户**并保持 `ACCOUNT_POOL_MIN` 个活跃账户(默认 50),按
+  `ACCOUNT_REFRESH_MS` 刷新 cookie,失败自动隔离并补池。账号选择、请求租约和
+  补池/刷新均为 single-flight；`/api/stats` 与管理员 `/api/accounts` 可查看安全的
+  状态、租约和补池指标，但不会返回 cookie/token。
+- **手动模式**: `AUTO_SESSION=false` 时不启动浏览器、不补池、不刷新旧 account pool，
+  只从 `SAKANA_SESSION_FILE` 读取一个显式会话。
 - **临时邮箱**: 每个新账户一个 mail.tm 临时邮箱(独立账号),免费额度绑定账号
   (Namazu $12.5/天、Fugu $6.25/周)。
 - **多轮对话**: 自动上下文续接(无需传 conversation_id,按首条 user 消息自动绑定

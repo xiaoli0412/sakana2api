@@ -1,0 +1,24 @@
+node_modules/
+.git/
+.zcode/
+.playwright-mcp/
+.browser-profile/
+runtime/
+
+# Runtime state and credentials are preserved outside source archives.
+.env
+.env.*
+session.json
+account_pool.json
+account_pool*.json
+account_pool.remote.json
+tokens.json
+keys.json
+tempmail.json
+server.log
+*.log
+.ssh_secret.json
+scripts/.ssh_secret.json
+
+capture_*.mjs
+probe_*.mjs

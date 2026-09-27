@@ -1395,7 +1395,7 @@
     <div class="topbar-left">
       <div class="topbar-title">
         <span id="pageHeaderTitle">仪表盘</span>
-        <span class="badge-tag" id="serverEnvTag">Sakana v0.9.3</span>
+        <span class="badge-tag" id="serverEnvTag">Sakana v0.13.0</span>
       </div>
       <div class="topbar-subtitle" id="pageHeaderSub">欢迎，Admin · 更新于 2026年8月16日 21:00</div>
     </div>
@@ -2482,8 +2482,7 @@ async function loadModels() {
     const sel = $('chatModelSelect');
     sel.innerHTML = '';
     
-    const regular = availableModels.filter(m => !m.rp);
-    const rpModels = availableModels.filter(m => m.rp);
+    const regular = availableModels;
     if (regular.length) {
       const g = document.createElement('optgroup');
       g.label = '标准模型';
@@ -2496,18 +2495,6 @@ async function loadModels() {
       });
       sel.appendChild(g);
     }
-    if (rpModels.length) {
-      const g = document.createElement('optgroup');
-      g.label = '🎭 RP 角色扮演';
-      rpModels.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        opt.textContent = `${m.id} 🎭`;
-        g.appendChild(opt);
-      });
-      sel.appendChild(g);
-    }
-
     if (sel.options.length) sel.value = 'sakana-namazu';
     $('chatModelBadge').textContent = sel.value || 'sakana-namazu';
     sel.onchange = () => {
@@ -3180,7 +3167,6 @@ function renderModelMatrix() {
       </div>
       <div>
         <div class="model-card-tags" style="margin-bottom:12px">
-          ${m.rp ? '<span class="pill blue">🎭 RP 角色扮演</span>' : ''}
           <span class="pill blue">上下文 128k</span>
           <span class="pill on">免费无限制</span>
           <span class="pill purple">深度思考</span>
