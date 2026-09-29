@@ -33,7 +33,7 @@ console.log('== 1. Gemini 路由解析 ==');
 
 console.log('== 2. Gemini 模型名映射 ==');
 {
-  for (const name of ['sakana-namazu-rp', 'models/sakana-fugu-rp', 'sakana-namazu:rp']) {
+  for (const name of ['sakana-namazu-rp', 'models/sakana-fugu-rp', 'sakana-namazu:rp', 'sakana-namazu-rp2', 'sakana-namazurp', 'sakana-fugu-rp2', 'sakana-namazu:rp2']) {
     try {
       mapGeminiModel(name);
       check(`${name} RP token rejects`, false, 'did not throw');

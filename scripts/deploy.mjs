@@ -9,9 +9,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Credentials from scripts/.ssh_secret.json (gitignored) or env vars.
 const _secPath = path.join(__dirname, '.ssh_secret.json');
 const _sec = fs.existsSync(_secPath) ? JSON.parse(fs.readFileSync(_secPath, 'utf8')) : {};
-const HOST = process.env.SAKANA_SSH_HOST || _sec.HOST || '38.76.190.150';
+const HOST = process.env.SAKANA_SSH_HOST || _sec.HOST || '';
 const PORT = Number(process.env.SAKANA_SSH_PORT || _sec.PORT || 22);
-const USER = process.env.SAKANA_SSH_USER || _sec.USER || 'root';
+const USER = process.env.SAKANA_SSH_USER || _sec.USER || '';
 const PASS = process.env.SAKANA_SSH_PASS || _sec.PASS || '';
 const REMOTE_DIR = '/root/sakana-2api';
 
@@ -39,6 +39,7 @@ function sshExec(cmd, opts = {}) {
 }
 
 async function deploy() {
+  if (!HOST || !USER) throw new Error('Set SAKANA_SSH_HOST and SAKANA_SSH_USER before deploying');
   console.log('=== 1. Check server environment ===');
   try {
     const r = await sshExec('uname -a && echo "---NODE---" && node --version 2>/dev/null || echo "NODE_NOT_FOUND" && echo "---CHROME---" && (google-chrome --version 2>/dev/null || chromium --version 2>/dev/null || echo "CHROME_NOT_FOUND") && echo "---MEM---" && free -h | grep Mem');
@@ -68,7 +69,7 @@ async function deploy() {
     '--exclude=.git', '--exclude=node_modules', '--exclude=session.json',
     '--exclude=tokens.json', '--exclude=server.log',
     '--exclude=*.png',
-    '-C', '/d/workspaces/sakana-2api', '.']);
+    '-C', path.resolve(__dirname, '..'), '.']);
   
   const sshProc = spawn('ssh', ['-o', 'StrictHostKeyChecking=no', '-p', String(PORT),
     `${USER}@${HOST}`, `tar xzf - -C ${REMOTE_DIR}`],

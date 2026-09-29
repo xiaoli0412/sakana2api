@@ -42,7 +42,7 @@ console.log('== 1b. hyphen model matrix parsing ==');
   }
   check('RP models removed from /v1/models', !MODELS.some((m) => m.id.includes('-rp')));
   check('total models = 12', MODELS.length === 12, String(MODELS.length));
-  for (const model of ['sakana-namazu-rp', 'sakana-fugu-rp', 'sakana-namazu:rp']) {
+  for (const model of ['sakana-namazu-rp', 'sakana-fugu-rp', 'sakana-namazu:rp', 'sakana-namazu-rp2', 'sakana-namazurp', 'sakana-fugu-rp2', 'sakana-namazu:rp2', 'models/sakana-namazu-rp2']) {
     try {
       parseModel(model);
       check(`parse ${model} rejects`, false, 'did not throw');

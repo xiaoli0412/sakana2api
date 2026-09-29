@@ -1,13 +1,13 @@
 {
   "name": "sakana-2api",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "private": true,
   "description": "OpenAI-compatible reverse proxy for the free chat.sakana.ai web chat (streaming, thinking, tools, web search, multimodal).",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "harvest": "node scripts/harvest.mjs",
-    "test": "node tests/translate.test.mjs && node tests/gemini-rp.test.mjs && node tests/tools-search.test.mjs && node tests/context.test.mjs && node tests/context-policy.test.mjs && node tests/request-normalizer.test.mjs && node tests/request-assembly.test.mjs && node tests/longcontext-upstream.test.mjs && node tests/rp-http-smoke.test.mjs && node tests/events.test.mjs && node tests/tool-state.test.mjs && node tests/account-pool.test.mjs && node tests/auto-session-lifecycle.test.mjs && node tests/observability.test.mjs && node tests/container-config.test.mjs",
+    "test": "node tests/translate.test.mjs && node tests/gemini-rp.test.mjs && node tests/tools-search.test.mjs && node tests/context.test.mjs && node tests/context-policy.test.mjs && node tests/request-normalizer.test.mjs && node tests/request-assembly.test.mjs && node tests/longcontext-upstream.test.mjs && node tests/rp-http-smoke.test.mjs && node tests/events.test.mjs && node tests/tool-state.test.mjs && node tests/account-pool.test.mjs && node tests/retention-account-pool.test.mjs && node tests/retention-cache-stats.test.mjs && node tests/retention-context.test.mjs && node tests/retention-concurrency.test.mjs && node tests/retention-cdp.test.mjs && node tests/upstream-lifecycle.test.mjs && node tests/admin-boundary-http.test.mjs && node tests/shutdown-cleanup.test.mjs && node tests/auto-session-lifecycle.test.mjs && node tests/observability.test.mjs && node tests/ui-smoke.test.mjs && node tests/sakana_browser_test.mjs && node tests/container-config.test.mjs && node tests/concurrency_100.test.mjs",
     "test:translate": "node tests/translate.test.mjs",
     "test:gemini": "node tests/gemini-rp.test.mjs",
     "test:tools": "node tests/tools-search.test.mjs",
@@ -19,6 +19,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "playwright": "^1.62.1"
+    "playwright": "^1.62.1",
+    "undici": "7.16.0"
   }
 }

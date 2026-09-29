@@ -27,10 +27,20 @@ RUNTIME_STATE_BASENAMES = (
     'tokens.json',
 )
 EXCLUDE_DIR_BASENAMES = {
-    '.git', '.zcode', 'node_modules', '.playwright-mcp', '.browser-profile', 'runtime'
+    '.git', '.zcode', 'node_modules', '.playwright-mcp', '.browser-profile',
+    '.chrome-sakana-profile', 'character_cards', 'runtime', '__pycache__',
 }
-EXCLUDE_RELATIVE_PATHS = {'runtime', 'scripts/.ssh_secret.json'}
-EXCLUDE_BASENAMES = set(RUNTIME_STATE_BASENAMES) | {'.ssh_secret.json', 'server.log'}
+EXCLUDE_RELATIVE_PATHS = {
+    'runtime', 'scripts/.ssh_secret.json', 'scripts/.env', 'scripts/.env.local',
+}
+EXCLUDE_BASENAMES = set(RUNTIME_STATE_BASENAMES) | {
+    '.ssh_secret.json', 'server.log', 'mailmsg.json', 'mailtoken.json',
+    'success_sample.json', 'Dockerfile.local',
+}
+EXCLUDE_SUFFIXES = (
+    '.log', '.exe', '.zip', '.tar', '.tar.gz', '.tgz', '.gz', '.7z', '.rar',
+    '.bak', '.db', '.sqlite', '.sqlite3', '.dump', '.pem', '.key', '.p12', '.pfx',
+)
 EXCLUDE_PREFIXES = (
     'raw_search', 'red', 'chunk-', 'mailmsg', 'mailtoken', 'success_sample',
     'capture_', 'scan_', 'probe_', 'replicate_', 'test_', 'dump_', 'check_',
@@ -56,7 +66,9 @@ def should_exclude(path: Path) -> bool:
         return True
     if rel in EXCLUDE_RELATIVE_PATHS or basename in EXCLUDE_BASENAMES:
         return True
-    if is_env_file(basename) or basename.endswith(('.log', '.exe')):
+    if basename.startswith('.') and basename not in {'.gitignore', '.dockerignore'}:
+        return True
+    if is_env_file(basename) or basename.endswith(EXCLUDE_SUFFIXES):
         return True
     return any(basename.startswith(prefix) for prefix in EXCLUDE_PREFIXES)
 

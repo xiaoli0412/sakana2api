@@ -12,7 +12,8 @@ HOST = SEC['HOST']; PORT = int(SEC['PORT']); USER = SEC['USER']; PASS = SEC['PAS
 
 def connect():
     ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.load_system_host_keys()
+    ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
     ssh.connect(HOST, PORT, USER, PASS, look_for_keys=False, allow_agent=False, timeout=30,
                 banner_timeout=30, auth_timeout=30)
     return ssh

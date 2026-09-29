@@ -1,8 +1,10 @@
-// Remote E2E against http://38.76.190.150:8787 — full requirements verification.
+// Remote E2E against the deployment pointed to by SAKANA_TEST_BASE —
+// full requirements verification. No implicit production target.
 // Run from the machine with the ssh secret (or locally, hitting the public URL).
 import zlib from 'node:zlib';
 
-const BASE = 'http://38.76.190.150:8787';
+const BASE = process.env.SAKANA_TEST_BASE || '';
+if (!BASE) throw new Error('Set SAKANA_TEST_BASE for remote E2E; production URLs are not implicit');
 const KEY = process.env.SAKANA_TEST_KEY || '';
 const AUTH = { authorization: 'Bearer ' + KEY };
 let fails = 0;

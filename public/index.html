@@ -2,82 +2,121 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Sakana2API · 高性能 AI 网关与控制台</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐟</text></svg>">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cascadia+Code:wght@400;600&family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+  try {
+    if (localStorage.getItem('sakana_theme') === 'light') document.documentElement.dataset.theme = 'light';
+  } catch {}
+</script>
 <style>
   :root {
-    --bg-base: #080c10;
-    --bg-page: #0d1117;
-    --bg-panel: #111722;
-    --bg-card: #151d2c;
-    --bg-card-hover: #1b2538;
-    --bg-input: #0b0f17;
-    --bg-glass: rgba(17, 23, 34, 0.82);
-    
-    --border-subtle: rgba(255, 255, 255, 0.07);
-    --border-card: #1e293d;
-    --border-hover: #2e3e5c;
-    --border-glow: rgba(16, 185, 129, 0.45);
-    
-    --emerald: #10b981;
-    --emerald-glow: #00ff88;
-    --emerald-dim: rgba(16, 185, 129, 0.15);
-    --cyan: #06b6d4;
-    --cyan-dim: rgba(6, 182, 212, 0.15);
-    --blue: #3b82f6;
-    --purple: #a855f7;
-    --purple-dim: rgba(168, 85, 247, 0.12);
-    --amber: #f59e0b;
-    --amber-dim: rgba(245, 158, 11, 0.15);
-    --rose: #f43f5e;
-    --rose-dim: rgba(244, 63, 94, 0.15);
-    
-    --text-main: #f3f4f6;
-    --text-sub: #cbd5e1;
-    --text-muted: #94a3b8;
-    --text-dim: #64748b;
-    
+    color-scheme: dark;
+    --bg-base: #111318;
+    --bg-page: #181a1f;
+    --bg-panel: #202329;
+    --bg-card: #272b33;
+    --bg-card-hover: #303640;
+    --bg-input: #17191e;
+    --bg-glass: rgba(32, 35, 41, 0.9);
+
+    --border-subtle: rgba(255, 255, 255, 0.09);
+    --border-card: #3a404a;
+    --border-hover: #606a78;
+    --border-accent: rgba(53, 201, 154, 0.38);
+
+    --emerald: #35c99a;
+    --accent-strong: #66d9b5;
+    --success-soft: rgba(53, 201, 154, 0.15);
+    --cyan: #5ec8e6;
+    --cyan-dim: rgba(94, 200, 230, 0.14);
+    --blue: #72a8ff;
+    --blue-strong: #b49cff;
+    --blue-soft: rgba(180, 156, 255, 0.14);
+    --amber: #f3bb66;
+    --amber-dim: rgba(243, 187, 102, 0.15);
+    --rose: #f47e94;
+    --rose-dim: rgba(244, 126, 148, 0.14);
+
+    --text-main: #f5f6f7;
+    --text-sub: #d4d8de;
+    --text-muted: #aeb5bf;
+    --text-dim: #89919d;
+    --accent-color: var(--emerald);
+    --focus-ring: rgba(53, 201, 154, 0.36);
+    --chart-grid: rgba(255, 255, 255, 0.1);
+    --chart-label: #89919d;
+    --chart-line: #66d9b5;
+    --chart-fill-start: rgba(53, 201, 154, 0.34);
+    --chart-fill-end: rgba(94, 200, 230, 0.02);
+    --heat-0: #252932;
+    --heat-1: #164e42;
+    --heat-2: #1c8064;
+    --heat-3: #35a980;
+    --heat-4: #66d9b5;
+
     --radius-sm: 6px;
-    --radius-md: 10px;
-    --radius-lg: 14px;
-    --radius-xl: 18px;
+    --radius-md: 8px;
+    --radius-lg: 10px;
+    --radius-xl: 12px;
     --radius-pill: 9999px;
-    
-    --shadow-card: 0 4px 20px -2px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--border-subtle);
-    --shadow-glow: 0 0 25px -5px rgba(16, 185, 129, 0.25);
-    --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
-    --font-sans: "Inter", -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.28), 0 8px 24px rgba(0, 0, 0, 0.12);
+    --focus-shadow: 0 0 0 3px var(--focus-ring);
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   }
 
-  /* Minimal Light Theme Support */
-  body.theme-light {
-    --bg-base: #f8fafc;
-    --bg-page: #f1f5f9;
+  body.theme-light, html[data-theme="light"] body {
+    color-scheme: light;
+    --bg-base: #f2f3f5;
+    --bg-page: #f7f7f8;
     --bg-panel: #ffffff;
     --bg-card: #ffffff;
-    --bg-card-hover: #f8fafc;
-    --bg-input: #f8fafc;
-    --border-subtle: rgba(0, 0, 0, 0.06);
-    --border-card: #e2e8f0;
-    --border-hover: #cbd5e1;
-    --text-main: #0f172a;
-    --text-sub: #334155;
-    --text-muted: #64748b;
-    --text-dim: #94a3b8;
-    --shadow-card: 0 2px 12px rgba(0,0,0,0.06);
+    --bg-card-hover: #f0f2f4;
+    --bg-input: #f4f5f6;
+    --bg-glass: rgba(255, 255, 255, 0.92);
+    --border-subtle: rgba(27, 31, 36, 0.1);
+    --border-card: #d9dde3;
+    --border-hover: #aeb6c1;
+    --border-accent: rgba(24, 135, 103, 0.28);
+    --emerald: #168765;
+    --accent-strong: #087654;
+    --success-soft: rgba(22, 135, 101, 0.11);
+    --cyan: #167a99;
+    --cyan-dim: rgba(22, 122, 153, 0.1);
+    --blue: #2769c5;
+    --blue-strong: #7257b7;
+    --blue-soft: rgba(114, 87, 183, 0.1);
+    --amber: #9a6009;
+    --amber-dim: rgba(154, 96, 9, 0.1);
+    --rose: #b43a56;
+    --rose-dim: rgba(180, 58, 86, 0.1);
+    --text-main: #1d2128;
+    --text-sub: #3e4652;
+    --text-muted: #66707c;
+    --text-dim: #7d8793;
+    --accent-color: var(--emerald);
+    --focus-ring: rgba(22, 135, 101, 0.24);
+    --chart-grid: rgba(27, 31, 36, 0.11);
+    --chart-label: #7d8793;
+    --chart-line: #087654;
+    --chart-fill-start: rgba(22, 135, 101, 0.2);
+    --chart-fill-end: rgba(22, 122, 153, 0.02);
+    --heat-0: #eef0f2;
+    --heat-1: #c6e8dc;
+    --heat-2: #8dceb9;
+    --heat-3: #4ca98b;
+    --heat-4: #168765;
+    --shadow-card: 0 1px 2px rgba(27, 31, 36, 0.06), 0 6px 18px rgba(27, 31, 36, 0.05);
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
   
   body {
     background-color: var(--bg-base);
-    background-image: 
-      radial-gradient(circle at 15% 15%, rgba(16, 185, 129, 0.05) 0%, transparent 35%),
-      radial-gradient(circle at 85% 75%, rgba(6, 182, 212, 0.04) 0%, transparent 40%);
+    background-image: none;
     color: var(--text-main);
     font-family: var(--font-sans);
     font-size: 13.5px;
@@ -95,7 +134,7 @@
   ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25); }
 
   a { color: var(--emerald); text-decoration: none; transition: color 0.15s; }
-  a:hover { color: var(--emerald-glow); text-decoration: underline; }
+  a:hover { color: var(--accent-strong); text-decoration: underline; }
   .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
   /* ================= SIDEBAR (Image 1 Style) ================= */
@@ -146,31 +185,31 @@
   .brand-logo {
     width: 36px;
     height: 36px;
-    background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(6, 182, 212, 0.15));
-    border: 1px solid rgba(16, 185, 129, 0.4);
+    background: var(--success-soft);
+    border: 1px solid var(--border-accent);
     border-radius: var(--radius-md);
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 20px;
-    box-shadow: 0 0 16px rgba(16, 185, 129, 0.2);
+    box-shadow: none;
     transition: transform 0.2s;
   }
   .brand-left:hover .brand-logo { transform: scale(1.06); }
   .brand-name {
     font-size: 15px;
     font-weight: 800;
-    letter-spacing: -0.3px;
-    color: #fff;
+    letter-spacing: 0;
+    color: var(--text-main);
   }
-  .brand-name span { color: var(--emerald-glow); }
+  .brand-name span { color: var(--accent-strong); }
   .brand-ext {
     color: var(--text-dim);
     font-size: 16px;
     cursor: pointer;
     transition: color 0.15s;
   }
-  .brand-ext:hover { color: #fff; }
+  .brand-ext:hover { color: var(--text-main); }
 
   .sidebar-nav {
     display: flex;
@@ -212,11 +251,11 @@
     border-color: var(--border-card);
   }
   .nav-btn.active {
-    color: var(--emerald-glow);
-    background: linear-gradient(135deg, rgba(16, 185, 129, 0.18), rgba(6, 182, 212, 0.08));
-    border-color: rgba(16, 185, 129, 0.4);
+    color: var(--accent-strong);
+    background: var(--success-soft);
+    border-color: var(--border-accent);
     font-weight: 600;
-    box-shadow: 0 0 16px rgba(16, 185, 129, 0.15);
+    box-shadow: none;
   }
   .nav-btn.active::before {
     content: '';
@@ -225,9 +264,8 @@
     top: 6px;
     bottom: 6px;
     width: 3.5px;
-    background: var(--emerald-glow);
+    background: var(--accent-strong);
     border-radius: 0 4px 4px 0;
-    box-shadow: 0 0 8px var(--emerald-glow);
   }
   .nav-icon {
     font-size: 16px;
@@ -275,8 +313,8 @@
     font-weight: 700;
     padding: 1px 4px;
     border-radius: 3px;
-    background: var(--emerald-dim);
-    color: var(--emerald-glow);
+    background: var(--success-soft);
+    color: var(--accent-strong);
     letter-spacing: 0.3px;
   }
 
@@ -302,13 +340,11 @@
     transition: all 0.3s ease;
   }
   .status-dot.ok {
-    background: var(--emerald-glow);
-    box-shadow: 0 0 10px var(--emerald-glow);
+    background: var(--accent-strong);
     animation: pulse 2s infinite;
   }
   .status-dot.err {
     background: var(--rose);
-    box-shadow: 0 0 10px var(--rose);
   }
   @keyframes pulse {
     0%, 100% { opacity: 1; transform: scale(1); }
@@ -356,8 +392,8 @@
     font-weight: 600;
     padding: 2px 8px;
     border-radius: var(--radius-pill);
-    background: var(--emerald-dim);
-    color: var(--emerald-glow);
+    background: var(--success-soft);
+    color: var(--accent-strong);
     border: 1px solid rgba(16, 185, 129, 0.3);
   }
   .topbar-subtitle {
@@ -403,23 +439,24 @@
     color: #fff;
   }
   .btn.primary {
-    background: linear-gradient(135deg, #10b981, #059669);
-    border-color: #10b981;
+    background: var(--accent-color);
+    border-color: var(--accent-color);
     color: #fff;
     font-weight: 600;
-    box-shadow: 0 2px 10px rgba(16, 185, 129, 0.3);
+    box-shadow: none;
   }
   .btn.primary:hover:not(:disabled) {
-    background: linear-gradient(135deg, #059669, #047857);
-    box-shadow: 0 4px 16px rgba(16, 185, 129, 0.45);
+    background: var(--accent-strong);
+    border-color: var(--accent-strong);
+    box-shadow: none;
   }
   .btn.cyan {
-    background: linear-gradient(135deg, #06b6d4, #0891b2);
-    border-color: #06b6d4;
+    background: var(--cyan);
+    border-color: var(--cyan);
     color: #fff;
-    box-shadow: 0 2px 10px rgba(6, 182, 212, 0.3);
+    box-shadow: none;
   }
-  .btn.cyan:hover:not(:disabled) { background: linear-gradient(135deg, #0891b2, #0e7490); }
+  .btn.cyan:hover:not(:disabled) { background: var(--blue); border-color: var(--blue); }
   .btn.danger {
     background: rgba(244, 63, 94, 0.12);
     border-color: rgba(244, 63, 94, 0.35);
@@ -451,7 +488,7 @@
   .btn-group-btn:hover { color: var(--text-main); }
   .btn-group-btn.active {
     background: var(--bg-card-hover);
-    color: var(--emerald-glow);
+    color: var(--accent-strong);
     font-weight: 600;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   }
@@ -467,12 +504,12 @@
     line-height: 1.3;
     border: 1px solid transparent;
   }
-  .pill.on { color: var(--emerald-glow); background: var(--emerald-dim); border-color: rgba(16, 185, 129, 0.3); }
+  .pill.on { color: var(--accent-strong); background: var(--success-soft); border-color: rgba(16, 185, 129, 0.3); }
   .pill.off { color: var(--text-dim); background: rgba(255, 255, 255, 0.05); border-color: var(--border-subtle); }
   .pill.rev { color: var(--rose); background: var(--rose-dim); border-color: rgba(244, 63, 94, 0.3); }
   .pill.rate { color: var(--amber); background: var(--amber-dim); border-color: rgba(245, 158, 11, 0.3); }
   .pill.blue { color: var(--cyan); background: var(--cyan-dim); border-color: rgba(6, 182, 212, 0.3); }
-  .pill.purple { color: var(--purple); background: var(--purple-dim); border-color: rgba(168, 85, 247, 0.3); }
+  .pill.info { color: var(--blue); background: var(--blue-soft); border-color: rgba(39, 105, 197, 0.3); }
 
   .card-panel {
     background: var(--bg-card);
@@ -526,7 +563,7 @@
   @media (max-width: 600px) { .dash-grid-top { grid-template-columns: 1fr; } }
 
   .metric-card {
-    background: linear-gradient(180deg, rgba(21, 29, 44, 0.95), rgba(17, 23, 34, 0.85));
+    background: var(--bg-card);
     border: 1px solid var(--border-card);
     border-radius: var(--radius-lg);
     padding: 16px 18px;
@@ -541,13 +578,13 @@
     position: absolute;
     top: 0; left: 0; right: 0;
     height: 2px;
-    background: linear-gradient(90deg, transparent, var(--accent-glow, var(--emerald)), transparent);
+    background: var(--accent-color-glow, var(--emerald));
     opacity: 0.8;
   }
-  .metric-card.c-emerald { --accent-glow: #10b981; }
-  .metric-card.c-cyan { --accent-glow: #06b6d4; }
-  .metric-card.c-purple { --accent-glow: #a855f7; }
-  .metric-card.c-amber { --accent-glow: #f59e0b; }
+  .metric-card.c-emerald { --accent-color-glow: var(--emerald); }
+  .metric-card.c-cyan { --accent-color-glow: var(--cyan); }
+  .metric-card.c-blue { --accent-color-glow: var(--blue); }
+  .metric-card.c-amber { --accent-color-glow: var(--amber); }
 
   .metric-head {
     display: flex;
@@ -661,14 +698,13 @@
   .heatmap-cell:hover {
     transform: scale(1.2);
     z-index: 10;
-    border-color: #fff;
-    box-shadow: 0 0 10px rgba(16, 185, 129, 0.6);
+    border-color: var(--text-main);
   }
-  .heatmap-cell.l-0 { background: #101622; }
-  .heatmap-cell.l-1 { background: #064e3b; border-color: #065f46; }
-  .heatmap-cell.l-2 { background: #047857; border-color: #059669; }
-  .heatmap-cell.l-3 { background: #10b981; border-color: #34d399; box-shadow: 0 0 6px rgba(16, 185, 129, 0.4); }
-  .heatmap-cell.l-4 { background: #00ff88; border-color: #6ee7b7; box-shadow: 0 0 10px rgba(0, 255, 136, 0.7); }
+  .heatmap-cell.l-0 { background: var(--heat-0); }
+  .heatmap-cell.l-1 { background: var(--heat-1); border-color: var(--heat-1); }
+  .heatmap-cell.l-2 { background: var(--heat-2); border-color: var(--heat-2); }
+  .heatmap-cell.l-3 { background: var(--heat-3); border-color: var(--heat-3); box-shadow: none; }
+  .heatmap-cell.l-4 { background: var(--heat-4); border-color: var(--heat-4); box-shadow: none; }
 
   /* Spline Chart */
   .chart-card {
@@ -700,7 +736,7 @@
     font-size: 12px;
   }
   .chart-metric-pill { display: flex; align-items: center; gap: 5px; color: var(--text-dim); }
-  .chart-metric-pill b { color: var(--emerald-glow); font-family: var(--font-mono); }
+  .chart-metric-pill b { color: var(--accent-strong); font-family: var(--font-mono); }
 
   .chart-canvas-container {
     width: 100%;
@@ -738,13 +774,13 @@
   }
   @media (max-width: 800px) { .podium-grid { grid-template-columns: 1fr; } }
   .podium-card {
-    background: linear-gradient(180deg, rgba(26, 36, 54, 0.7), rgba(17, 23, 34, 0.9));
+    background: var(--bg-card);
     border: 1px solid var(--border-card);
     border-radius: var(--radius-lg);
     padding: 14px 16px;
     position: relative;
   }
-  .podium-card.top1 { border-color: rgba(16, 185, 129, 0.4); background: linear-gradient(180deg, rgba(16, 185, 129, 0.12), rgba(17, 23, 34, 0.9)); }
+  .podium-card.top1 { border-color: var(--border-accent); background: var(--success-soft); }
   .podium-badge {
     font-size: 10px;
     font-weight: 700;
@@ -755,7 +791,7 @@
     display: inline-block;
     margin-bottom: 6px;
   }
-  .podium-card.top1 .podium-badge { background: var(--emerald-dim); color: var(--emerald-glow); border: 1px solid rgba(16, 185, 129, 0.3); }
+  .podium-card.top1 .podium-badge { background: var(--success-soft); color: var(--accent-strong); border: 1px solid var(--border-accent); }
   .podium-name { font-size: 14px; font-weight: 700; color: var(--text-main); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .podium-stat { font-size: 12px; color: var(--text-dim); }
 
@@ -828,7 +864,7 @@
   .chat-history-item.active {
     background: var(--bg-card);
     border-color: rgba(16, 185, 129, 0.3);
-    color: var(--emerald-glow);
+    color: var(--accent-strong);
     font-weight: 500;
   }
   .chat-history-item .title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -882,7 +918,6 @@
   .chat-hero-art {
     font-size: 52px;
     margin-bottom: 12px;
-    filter: drop-shadow(0 0 20px rgba(16, 185, 129, 0.4));
     animation: float 4s ease-in-out infinite;
   }
   @keyframes float {
@@ -923,7 +958,7 @@
   .suggestion-chip:hover {
     background: var(--bg-card-hover);
     border-color: var(--emerald);
-    color: var(--emerald-glow);
+    color: var(--accent-strong);
   }
 
   /* Message Bubbles */
@@ -948,12 +983,12 @@
     border: 1px solid var(--border-card);
   }
   .msg-row.user .msg-avatar {
-    background: linear-gradient(135deg, rgba(6, 182, 212, 0.2), rgba(59, 130, 246, 0.2));
-    border-color: rgba(6, 182, 212, 0.4);
+    background: var(--blue-soft);
+    border-color: var(--border-hover);
   }
   .msg-row.assistant .msg-avatar {
-    background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(0, 255, 136, 0.15));
-    border-color: rgba(16, 185, 129, 0.4);
+    background: var(--success-soft);
+    border-color: var(--border-hover);
   }
 
   .msg-content-wrap {
@@ -984,14 +1019,14 @@
     box-shadow: var(--shadow-card);
   }
   .msg-row.user .msg-bubble {
-    background: linear-gradient(180deg, #162235, #111a29);
-    border-color: rgba(6, 182, 212, 0.25);
+    background: var(--bg-card);
+    border-color: var(--border-hover);
   }
 
   /* Thinking Box */
   .thinking-box {
-    border-left: 3px solid var(--purple);
-    background: rgba(168, 85, 247, 0.06);
+    border-left: 3px solid var(--blue);
+    background: var(--blue-soft);
     border-radius: 0 var(--radius-md) var(--radius-md) 0;
     padding: 10px 14px;
     margin: 8px 0;
@@ -1000,7 +1035,7 @@
   }
   .thinking-box summary {
     font-weight: 600;
-    color: var(--purple);
+    color: var(--blue);
     cursor: pointer;
     user-select: none;
     outline: none;
@@ -1010,7 +1045,7 @@
     white-space: pre-wrap;
     font-family: var(--font-mono);
     line-height: 1.6;
-    color: #c084fc;
+    color: var(--blue);
     font-size: 12px;
   }
 
@@ -1083,7 +1118,7 @@
 
   .typing-cursor::after {
     content: "▋";
-    color: var(--emerald-glow);
+    color: var(--accent-strong);
     animation: blink 0.9s infinite;
   }
   @keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
@@ -1091,7 +1126,7 @@
   /* Chat Input Area (Image 3 Style) */
   .chat-bottom-bar {
     padding: 10px 20px 16px;
-    background: linear-gradient(180deg, transparent, var(--bg-page) 35%);
+    background: var(--bg-page);
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -1104,15 +1139,15 @@
     border: 1px solid var(--border-card);
     border-radius: var(--radius-xl);
     padding: 10px 14px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-card);
     display: flex;
     flex-direction: column;
     gap: 8px;
     transition: border-color 0.2s, box-shadow 0.2s;
   }
   .chat-input-card:focus-within {
-    border-color: rgba(16, 185, 129, 0.5);
-    box-shadow: 0 0 20px rgba(16, 185, 129, 0.2);
+    border-color: var(--border-accent);
+    box-shadow: var(--focus-shadow);
   }
 
   .attachments-preview {
@@ -1182,8 +1217,8 @@
     transition: all 0.15s;
   }
   .toggle-btn.active {
-    background: var(--emerald-dim);
-    color: var(--emerald-glow);
+    background: var(--success-soft);
+    color: var(--accent-strong);
     border-color: rgba(16, 185, 129, 0.4);
   }
 
@@ -1321,6 +1356,155 @@
     text-align: center;
     box-shadow: 0 24px 80px rgba(0,0,0,0.6);
   }
+
+  /* v0.14 shell: quiet surfaces, touch-safe controls, and system typography. */
+  html[data-theme="light"] body { color-scheme: light; }
+  html, body { min-height: 100%; }
+  body {
+    background: var(--bg-base);
+    background-image: none;
+    min-height: 100svh;
+    height: 100svh;
+  }
+  button, input, select, textarea { font: inherit; }
+  :focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
+  .sidebar {
+    background: var(--bg-panel);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.14);
+    padding-top: calc(16px + env(safe-area-inset-top));
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+  .brand-logo { background: var(--success-soft); border-color: var(--border-accent); box-shadow: none; }
+  .brand-name span, .nav-btn.active, .tree-method, .chart-metric-pill b { color: var(--accent-strong); }
+  .brand-name { color: var(--text-main); }
+  .brand-ext:hover { color: var(--text-main); }
+  .nav-btn.active { background: var(--success-soft); border-color: var(--border-accent); box-shadow: none; }
+  .nav-btn.active::before { background: var(--accent-color); box-shadow: none; }
+  .tree-method { background: var(--success-soft); }
+  .status-dot.ok { background: var(--accent-color); box-shadow: none; }
+  .topbar { min-height: 56px; height: auto; padding: calc(8px + env(safe-area-inset-top)) 24px 8px; }
+  .topbar-title { color: var(--text-main); }
+  .topbar-title .badge-tag { background: var(--success-soft); color: var(--accent-strong); border-color: var(--border-accent); }
+  .content-viewport { padding-bottom: calc(22px + env(safe-area-inset-bottom)); }
+  .btn { min-height: 36px; box-shadow: none; }
+  .btn:hover:not(:disabled) { color: var(--text-main); }
+  .btn.primary, .btn.cyan { background: var(--accent-color); border-color: var(--accent-color); color: #fff; box-shadow: none; }
+  .btn.primary:hover:not(:disabled), .btn.cyan:hover:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); box-shadow: none; }
+  .btn-group-btn.active { color: var(--accent-strong); box-shadow: none; }
+  .card-panel, .chart-card, .heatmap-card, .table-wrap, .grouped-stats-banner, .model-card, .podium-card, .metric-card, .ops-item { box-shadow: var(--shadow-card); }
+  .metric-card, .podium-card, .msg-row.user .msg-bubble { background: var(--bg-card); }
+  .metric-card::before { background: var(--accent-color); }
+  .metric-card.c-emerald, .metric-card.c-cyan, .metric-card.c-blue, .metric-card.c-amber { --accent-color-glow: var(--accent-color); }
+  .metric-icon { background: var(--bg-card-hover); }
+  th { background: var(--bg-card-hover); }
+  tr:hover td { background: var(--bg-card-hover); }
+  .heatmap-cell { background: var(--heat-0); border-color: var(--border-subtle); }
+  .heatmap-cell.l-0 { background: var(--heat-0); }
+  .heatmap-cell.l-1 { background: var(--heat-1); border-color: var(--heat-1); }
+  .heatmap-cell.l-2 { background: var(--heat-2); border-color: var(--heat-2); }
+  .heatmap-cell.l-3 { background: var(--heat-3); border-color: var(--heat-3); box-shadow: none; }
+  .heatmap-cell.l-4 { background: var(--heat-4); border-color: var(--heat-4); box-shadow: none; }
+  .chat-layout { min-width: 0; }
+  .chat-top-header { background: var(--bg-glass); }
+  .chat-input-card { box-shadow: var(--shadow-card); }
+  .chat-input-card:focus-within { border-color: var(--border-accent); box-shadow: var(--focus-shadow); }
+  .msg-row.assistant .msg-avatar, .msg-row.user .msg-avatar { background: var(--bg-card); border-color: var(--border-card); }
+  .thinking-box { background: var(--blue-soft); }
+  .typing-cursor::after { color: var(--accent-strong); }
+  .json-viewer { background: var(--bg-input); color: var(--cyan); }
+  .modal-overlay { background: rgba(16, 18, 22, 0.58); }
+  .modal-box { box-shadow: 0 20px 60px rgba(0, 0, 0, 0.22); }
+  .sidebar-backdrop { display: none; }
+  .mobile-menu-btn { display: none; }
+
+  @media (max-width: 1023px) {
+    .mobile-menu-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      min-width: 44px;
+      height: 44px;
+      padding: 0;
+      border: 1px solid var(--border-card);
+      border-radius: var(--radius-md);
+      background: var(--bg-card);
+      color: var(--text-main);
+      cursor: pointer;
+    }
+    .sidebar {
+      position: fixed;
+      inset: 0 auto 0 0;
+      width: min(280px, 86vw);
+      transform: translateX(-105%);
+      transition: transform 180ms ease;
+      z-index: 100;
+    }
+    .sidebar.drawer-open { transform: translateX(0); }
+    .sidebar.collapsed { width: min(280px, 86vw); }
+    .sidebar.collapsed .brand-name,
+    .sidebar.collapsed .brand-ext,
+    .sidebar.collapsed .nav-text,
+    .sidebar.collapsed .nav-section-title,
+    .sidebar.collapsed .tree-item-title,
+    .sidebar.collapsed .sidebar-footer-text { display: initial !important; }
+    .sidebar.collapsed .nav-btn { justify-content: flex-start; padding: 8px 10px; }
+    .sidebar-backdrop:not([hidden]) {
+      display: block;
+      position: fixed;
+      inset: 0;
+      z-index: 90;
+      background: rgba(16, 18, 22, 0.46);
+    }
+    .main { width: 100%; min-width: 0; }
+    .topbar { padding-inline: 16px; }
+    .topbar-left { min-width: 0; gap: 10px; }
+    .topbar-title { min-width: 0; flex-wrap: wrap; }
+    .topbar-subtitle { display: none; }
+    .topbar-right { min-width: 0; }
+    .content-viewport { padding: 18px; }
+    .chat-layout { margin: -18px; height: calc(100svh - 64px); }
+    .chat-sidebar { width: 220px; }
+  }
+
+  @media (max-width: 700px) {
+    .topbar { align-items: flex-start; padding-top: calc(8px + env(safe-area-inset-top)); }
+    .topbar-left { flex: 1; }
+    .topbar-right { display: none !important; }
+    .content-viewport { padding: 14px 12px calc(14px + env(safe-area-inset-bottom)); }
+    .dash-grid-top, .grouped-stats-banner { grid-template-columns: 1fr; gap: 10px; }
+    .group-stat-item, .group-stat-item:first-child { border-left: 0; border-top: 1px solid var(--border-subtle); padding: 10px 0 0; }
+    .group-stat-item:first-child { border-top: 0; padding-top: 0; }
+    .chart-head { align-items: stretch; }
+    .chart-head > div:last-child { width: 100%; }
+    .chart-head .btn-group { flex: 1; }
+    .chart-head .btn-group-btn { flex: 1; }
+    .chart-canvas-container { height: 190px; }
+    .table-wrap { margin-inline: -2px; }
+    .chat-layout { margin: -14px -12px; height: calc(100svh - 64px); }
+    .chat-top-header { padding-inline: 12px; }
+    .chat-top-header .btn { min-width: 44px; padding-inline: 8px; }
+    .chat-top-header .btn { font-size: 0; }
+    .chat-top-header .btn::first-letter { font-size: 16px; }
+    .chat-viewport { padding: 18px 12px; }
+    .chat-bottom-bar { padding: 8px 12px calc(12px + env(safe-area-inset-bottom)); }
+    .chat-controls-row { align-items: stretch; flex-wrap: wrap; gap: 8px; }
+    .chat-controls-left { width: 100%; flex-wrap: wrap; gap: 8px; }
+    .chat-controls-left > * { min-height: 44px; }
+    .chat-select { min-width: 0; flex: 1 1 170px; }
+    .chat-controls-row > div:last-child { width: 100%; justify-content: flex-end; }
+    .chat-controls-row .btn.primary { min-height: 44px; }
+    .chat-input-card { border-radius: var(--radius-lg); padding: 10px; }
+    .chat-textarea { min-height: 32px; }
+    .msg-row { gap: 9px; }
+    .msg-avatar { width: 32px; height: 32px; }
+    .modal-box { padding: 20px; }
+    .input-text, .btn, .btn.sm, .toggle-btn, .btn-group-btn, .chat-select { min-height: 44px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+  }
 </style>
 </head>
 <body>
@@ -1389,13 +1573,15 @@
 </nav>
 
 <!-- ================= MAIN CONTAINER ================= -->
+<div class="sidebar-backdrop" id="sidebarBackdrop" hidden></div>
 <div class="main">
   <!-- Topbar -->
   <div class="topbar">
     <div class="topbar-left">
+      <button class="mobile-menu-btn" id="btnOpenSidebar" type="button" aria-label="打开导航" title="打开导航">☰</button>
       <div class="topbar-title">
         <span id="pageHeaderTitle">仪表盘</span>
-        <span class="badge-tag" id="serverEnvTag">Sakana v0.13.0</span>
+        <span class="badge-tag" id="serverEnvTag">Sakana v0.14.0</span>
       </div>
       <div class="topbar-subtitle" id="pageHeaderSub">欢迎，Admin · 更新于 2026年8月16日 21:00</div>
     </div>
@@ -1424,7 +1610,7 @@
           <div class="metric-head"><span class="metric-label">可用账号</span><span class="metric-icon">👥</span></div>
           <div class="metric-val" id="metricAccounts">0</div>
           <div class="metric-sub" id="metricAccountsSub">0 / 0 可用 · 0 冷却 · 0 失效</div>
-          <div class="metric-bar"><div class="metric-bar-fill" id="barAccounts" style="width:0%;background:var(--emerald-glow)"></div></div>
+          <div class="metric-bar"><div class="metric-bar-fill" id="barAccounts" style="width:0%;background:var(--accent-strong)"></div></div>
         </div>
 
         <div class="metric-card c-cyan">
@@ -1434,11 +1620,11 @@
           <div class="metric-bar"><div class="metric-bar-fill" id="barRequests" style="width:0%;background:var(--cyan)"></div></div>
         </div>
 
-        <div class="metric-card c-purple">
+        <div class="metric-card c-blue">
           <div class="metric-head"><span class="metric-label">总 Tokens</span><span class="metric-icon">🧮</span></div>
           <div class="metric-val" id="metricTokens">0</div>
           <div class="metric-sub" id="metricTokensSub">输出 0 · 输入 0 · 缓存 0%</div>
-          <div class="metric-bar"><div class="metric-bar-fill" id="barTokens" style="width:0%;background:var(--purple)"></div></div>
+          <div class="metric-bar"><div class="metric-bar-fill" id="barTokens" style="width:0%;background:var(--blue)"></div></div>
         </div>
 
         <div class="metric-card c-amber">
@@ -1488,11 +1674,11 @@
           </div>
           <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)">
             <span>低</span>
-            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#101622"></span>
-            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#064e3b"></span>
-            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#047857"></span>
-            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#10b981"></span>
-            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#00ff88"></span>
+            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--heat-0)"></span>
+            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--heat-1)"></span>
+            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--heat-2)"></span>
+            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--heat-3)"></span>
+            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--heat-4)"></span>
             <span>高</span>
           </div>
         </div>
@@ -1534,9 +1720,9 @@
           <canvas id="trendChart"></canvas>
         </div>
         <div class="chart-legend">
-          <div class="chart-legend-item"><span class="chart-legend-dot" style="background:var(--emerald-glow)"></span> sakana-namazu</div>
+          <div class="chart-legend-item"><span class="chart-legend-dot" style="background:var(--accent-strong)"></span> sakana-namazu</div>
           <div class="chart-legend-item"><span class="chart-legend-dot" style="background:var(--cyan)"></span> sakana-fugu</div>
-          <div class="chart-legend-item"><span class="chart-legend-dot" style="background:var(--purple)"></span> 其他模型 / 思考链</div>
+          <div class="chart-legend-item"><span class="chart-legend-dot" style="background:var(--blue)"></span> 其他模型 / 思考链</div>
         </div>
       </div>
 
@@ -1675,7 +1861,7 @@
     <div data-pane="models" hidden>
       <div class="section-title">
         <span>🧩 支持的模型矩阵 (Model Matrix)</span>
-        <span style="font-size:12px;color:var(--text-dim);font-weight:400">共 16 种衍生微调/风格模型</span>
+        <span style="font-size:12px;color:var(--text-dim);font-weight:400" id="modelMatrixCount">模型加载中</span>
       </div>
       <div class="model-matrix-grid" id="modelMatrixGrid"></div>
     </div>
@@ -1710,7 +1896,7 @@
           <div class="metric-val" id="accStatLimited">0</div>
           <div class="metric-sub">自动降级隔离</div>
         </div>
-        <div class="metric-card c-purple">
+        <div class="metric-card c-blue">
           <div class="metric-head"><span class="metric-label">失效待刷</span><span class="metric-icon">⚠️</span></div>
           <div class="metric-val" id="accStatExpired">0</div>
           <div class="metric-sub">需重新 Harvest</div>
@@ -1747,7 +1933,7 @@
         </div>
 
         <div id="newKeyAlert" class="card-panel" style="border-color:var(--emerald);background:rgba(16,185,129,0.08);margin-bottom:16px" hidden>
-          <div style="font-weight:700;color:var(--emerald-glow);margin-bottom:4px">🎉 密钥创建成功 (请立即妥善保存，仅显示一次)</div>
+          <div style="font-weight:700;color:var(--accent-strong);margin-bottom:4px">🎉 密钥创建成功 (请立即妥善保存，仅显示一次)</div>
           <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
             <input type="text" class="input-text mono" id="newKeyVal" readonly>
             <button class="btn primary sm" id="btnCopyNewKey">复制</button>
@@ -1883,7 +2069,7 @@ for chunk in response:
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
             <span class="pill on">POST</span>
             <span class="mono" style="font-weight:700;font-size:14px;color:#fff">/v1/messages</span>
-            <span class="pill purple">Anthropic Claude 兼容接口</span>
+            <span class="pill info">Anthropic Claude 兼容接口</span>
           </div>
           <p style="color:var(--text-muted);font-size:12.5px;margin-bottom:10px">
             兼容 Claude 风格请求结构，自动转换为 Sakana 协议并返回 content_block_delta 格式流。
@@ -1970,14 +2156,14 @@ for chunk in response:
 <!-- ================= AUDIT DETAIL MODAL ================= -->
 <div class="modal-overlay" id="auditDetailModal" hidden>
   <div class="modal-box" style="max-width:700px">
-    <div class="modal-title">🔍 请求报文审计详情</div>
+    <div class="modal-title">🔍 请求审计详情</div>
     <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
       <div>
-        <div style="font-size:11.5px;font-weight:600;color:var(--text-dim);margin-bottom:4px">请求载荷 (Request Body):</div>
+        <div style="font-size:11.5px;font-weight:600;color:var(--text-dim);margin-bottom:4px">请求元数据:</div>
         <div class="json-viewer" id="modalAuditReq"></div>
       </div>
       <div>
-        <div style="font-size:11.5px;font-weight:600;color:var(--text-dim);margin-bottom:4px">响应结果 (Response Body):</div>
+        <div style="font-size:11.5px;font-weight:600;color:var(--text-dim);margin-bottom:4px">响应元数据与响应头:</div>
         <div class="json-viewer" id="modalAuditRes"></div>
       </div>
     </div>
@@ -1995,11 +2181,42 @@ for chunk in response:
 'use strict';
 
 const $ = id => document.getElementById(id);
+
+const THEME_STORAGE_KEY = 'sakana_theme';
+function readStoredTheme() {
+  try { return localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark'; } catch { return 'dark'; }
+}
+function applyTheme(theme, persist = true) {
+  const light = theme === 'light';
+  document.body.classList.toggle('theme-light', light);
+  document.documentElement.dataset.theme = light ? 'light' : 'dark';
+  $('btnThemeDark')?.classList.toggle('active', !light);
+  $('btnThemeLight')?.classList.toggle('active', light);
+  if (persist) {
+    try { localStorage.setItem(THEME_STORAGE_KEY, light ? 'light' : 'dark'); } catch {}
+  }
+}
+
 let activeTab = 'dash';
 let statsData = null;
 let lastCacheStats = { size: 0, hitRate: '0%' };
 let auditLogs = [];
 let availableModels = [];
+
+function safeParseJson(raw, fallback) {
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+// Keep canvas colors in sync with the selected light/dark token set.
+function cssToken(name, fallback) {
+  const value = getComputedStyle(document.body).getPropertyValue(name).trim();
+  return value || fallback;
+}
 
 // Toast Notification
 function toast(msg, kind = 'ok') {
@@ -2116,12 +2333,12 @@ function switchTab(tab) {
   });
 
   const titles = {
-    dash: ['仪表盘', '欢迎，Admin · 更新于 2026年8月16日 21:00'],
-    chat: ['Sakana Chat', '智能多模态 AI 对话体验'],
-    accounts: ['账号池管理', '上游逆向会话池与自动保活'],
-    keys: ['API 密钥管理', 'Bearer 令牌生成与多应用分发'],
-    models: ['模型矩阵', '全功能 12 款衍生风格与能力模型'],
-    audit: ['请求审计日志', '实时记录每一条 API 调用'],
+    dash: ['仪表盘', '运行状态与请求元数据'],
+    chat: ['Sakana Chat', '多模态对话与长上下文'],
+    accounts: ['账号池管理', '上游会话池与自动保活'],
+    keys: ['API 密钥管理', 'Bearer 令牌生成与应用分发'],
+    models: ['模型矩阵', '12 个标准模型，支持思考与搜索模式'],
+    audit: ['请求审计日志', '仅保留请求与响应元数据'],
     docs: ['API 接入文档', 'OpenAI / Anthropic 兼容接口标准'],
     settings: ['系统配置', '端点与运行时诊断'],
   };
@@ -2137,6 +2354,20 @@ function switchTab(tab) {
 }
 
 $('brandBtn').onclick = () => switchTab('dash');
+
+function setSidebarDrawer(open) {
+  const sidebar = $('mainSidebar');
+  const backdrop = $('sidebarBackdrop');
+  if (!sidebar || !backdrop) return;
+  sidebar.classList.toggle('drawer-open', open);
+  backdrop.hidden = !open;
+  document.body.style.overflow = open ? 'hidden' : '';
+}
+$('btnOpenSidebar').onclick = () => setSidebarDrawer(true);
+$('sidebarBackdrop').onclick = () => setSidebarDrawer(false);
+$('mainSidebar').addEventListener('click', (e) => {
+  if (e.target.closest('[data-tab]')) setSidebarDrawer(false);
+});
 $('btnGlobalRefresh').onclick = () => {
   refreshStats();
   toast('已刷新全局数据');
@@ -2299,9 +2530,9 @@ function renderTrendChart() {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.parentElement.getBoundingClientRect();
   
-  canvas.width = rect.width * dpr;
-  canvas.height = rect.height * dpr;
-  ctx.scale(dpr, dpr);
+  canvas.width = Math.max(1, rect.width * dpr);
+  canvas.height = Math.max(1, rect.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   const w = rect.width;
   const h = rect.height;
@@ -2329,7 +2560,7 @@ function renderTrendChart() {
   const chartH = h - paddingY * 2;
 
   // Grid lines
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+  ctx.strokeStyle = cssToken('--chart-grid', 'rgba(255, 255, 255, 0.1)');
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = paddingY + (chartH / 4) * i;
@@ -2341,8 +2572,8 @@ function renderTrendChart() {
     const valLabel = currentChartMetric === 'cost' 
       ? '$' + ((maxVal * (4 - i) / 4)).toFixed(2)
       : fmtK(Math.round(maxVal * (4 - i) / 4));
-    ctx.fillStyle = '#64748b';
-    ctx.font = '10.5px Inter, sans-serif';
+    ctx.fillStyle = cssToken('--chart-label', '#89919d');
+    ctx.font = '10.5px ' + cssToken('--font-sans', 'sans-serif');
     ctx.textAlign = 'right';
     ctx.fillText(valLabel, paddingX - 8, y + 3.5);
   }
@@ -2357,8 +2588,8 @@ function renderTrendChart() {
     const barW = Math.max(4, chartW / dataPoints.length - 4);
     pts.forEach(p => {
       const grad = ctx.createLinearGradient(0, p.y, 0, paddingY + chartH);
-      grad.addColorStop(0, '#10b981');
-      grad.addColorStop(1, 'rgba(16, 185, 129, 0.05)');
+      grad.addColorStop(0, cssToken('--chart-line', '#66d9b5'));
+      grad.addColorStop(1, cssToken('--chart-fill-end', 'rgba(53, 201, 154, 0.02)'));
       ctx.fillStyle = grad;
       ctx.fillRect(p.x - barW/2, p.y, barW, paddingY + chartH - p.y);
     });
@@ -2376,9 +2607,9 @@ function renderTrendChart() {
     if (currentChartType === 'area') {
       ctx.save();
       const fillGrad = ctx.createLinearGradient(0, paddingY, 0, paddingY + chartH);
-      fillGrad.addColorStop(0, 'rgba(16, 185, 129, 0.4)');
-      fillGrad.addColorStop(0.7, 'rgba(6, 182, 212, 0.15)');
-      fillGrad.addColorStop(1, 'rgba(16, 185, 129, 0.0)');
+      fillGrad.addColorStop(0, cssToken('--chart-fill-start', 'rgba(53, 201, 154, 0.34)'));
+      fillGrad.addColorStop(0.7, cssToken('--chart-fill-end', 'rgba(94, 200, 230, 0.02)'));
+      fillGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
       
       const areaPath = new Path2D();
       areaPath.moveTo(pts[0].x, paddingY + chartH);
@@ -2396,17 +2627,17 @@ function renderTrendChart() {
       ctx.restore();
     }
 
-    ctx.strokeStyle = '#00ff88';
+    ctx.strokeStyle = cssToken('--chart-line', '#66d9b5');
     ctx.lineWidth = 2.5;
-    ctx.shadowColor = 'rgba(0, 255, 136, 0.6)';
-    ctx.shadowBlur = 10;
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
     ctx.stroke();
     ctx.shadowBlur = 0;
   }
 
   // Draw X labels
-  ctx.fillStyle = '#64748b';
-  ctx.font = '10px Inter, sans-serif';
+  ctx.fillStyle = cssToken('--chart-label', '#89919d');
+  ctx.font = '10px ' + cssToken('--font-sans', 'sans-serif');
   ctx.textAlign = 'center';
   pts.forEach((p, idx) => {
     if (idx % 4 === 0 || idx === pts.length - 1) {
@@ -2456,7 +2687,7 @@ function renderModelRanks(byModel) {
       <td class="mono">${fmtK(m.cTok)}</td>
       <td>${lastCacheStats.hitRate}</td>
       <td class="mono">${fmtK(m.totalTok)}</td>
-      <td class="mono" style="color:var(--emerald-glow)">$${m.cost}</td>
+      <td class="mono" style="color:var(--accent-strong)">$${m.cost}</td>
     </tr>
   `).join('');
 }
@@ -2466,27 +2697,140 @@ let activeConversationId = null;
 let isGenerating = false;
 let activeAbort = null;      // AbortController of the in-flight request (stop button)
 let abortedByUser = false;
-let chatSessions = JSON.parse(localStorage.getItem('sakana_chat_sessions') || '[]');
+
+const CHAT_STORAGE_KEY = 'sakana_chat_sessions';
+const CHAT_LIMITS = Object.freeze({
+  maxSessions: 20,
+  maxMessagesPerSession: 80,
+  maxMessages: 400,
+  maxMessageChars: 12000,
+  maxBytes: 2 * 1024 * 1024,
+});
+
+function utf8ByteLength(value) {
+  try { return new TextEncoder().encode(String(value)).length; } catch { return String(value).length; }
+}
+
+function sanitizeStoredFile(file) {
+  if (!file || typeof file !== 'object') return null;
+  return {
+    name: String(file.name || 'attachment').slice(0, 200),
+    type: String(file.type || 'application/octet-stream').slice(0, 120),
+    dataUrl: null,
+  };
+}
+
+function sanitizeStoredMessage(message) {
+  if (!message || typeof message !== 'object') return null;
+  const role = message.role === 'assistant' ? 'assistant' : 'user';
+  const content = String(message.content || '').slice(0, CHAT_LIMITS.maxMessageChars);
+  const reasoning = String(message.reasoning || '').slice(0, CHAT_LIMITS.maxMessageChars);
+  const citations = Array.isArray(message.citations)
+    ? message.citations.slice(0, 20).map(c => ({
+        title: String(c?.title || '').slice(0, 240),
+        url: String(c?.url || '').slice(0, 1000),
+      }))
+    : [];
+  const files = Array.isArray(message.files) ? message.files.map(sanitizeStoredFile).filter(Boolean).slice(0, 12) : [];
+  return { role, content, reasoning, citations, files, ts: Number(message.ts) || Date.now() };
+}
+
+function sanitizeStoredSession(session) {
+  if (!session || typeof session !== 'object' || !session.id) return null;
+  const messages = Array.isArray(session.messages)
+    ? session.messages.map(sanitizeStoredMessage).filter(Boolean).slice(-CHAT_LIMITS.maxMessagesPerSession)
+    : [];
+  return {
+    id: String(session.id).slice(0, 120),
+    title: String(session.title || '新会话').slice(0, 120),
+    conversationId: session.conversationId ? String(session.conversationId).slice(0, 180) : undefined,
+    createdAt: Number(session.createdAt) || Date.now(),
+    messages,
+  };
+}
+
+function limitChatSessions(sessions) {
+  const normalized = (Array.isArray(sessions) ? sessions : [])
+    .map(sanitizeStoredSession)
+    .filter(Boolean)
+    .slice(0, CHAT_LIMITS.maxSessions);
+  let totalMessages = 0;
+  for (const session of normalized) {
+    const remaining = Math.max(0, CHAT_LIMITS.maxMessages - totalMessages);
+    const keep = Math.min(CHAT_LIMITS.maxMessagesPerSession, remaining);
+    session.messages = keep ? session.messages.slice(-keep) : [];
+    totalMessages += session.messages.length;
+  }
+
+  // Remove oldest sessions/messages until the UTF-8 payload fits the quota budget.
+  while (normalized.length && utf8ByteLength(JSON.stringify(normalized)) > CHAT_LIMITS.maxBytes) {
+    const oldest = normalized[normalized.length - 1];
+    if (oldest.messages.length) oldest.messages.shift();
+    else normalized.pop();
+  }
+  return normalized;
+}
+
+function loadChatSessions() {
+  try {
+    const parsed = safeParseJson(localStorage.getItem(CHAT_STORAGE_KEY) || '[]', []);
+    const bounded = limitChatSessions(parsed);
+    try { localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(bounded)); } catch {}
+    return bounded;
+  } catch {
+    return [];
+  }
+}
+
+// Bound live arrays without cloning them, so the active SSE request retains its
+// attachment data until the request is assembled and sent.
+function boundLiveChatSessions() {
+  if (!Array.isArray(chatSessions)) chatSessions = [];
+  chatSessions = chatSessions.slice(0, CHAT_LIMITS.maxSessions);
+  let totalMessages = 0;
+  for (const session of chatSessions) {
+    const messages = Array.isArray(session.messages) ? session.messages.slice(-CHAT_LIMITS.maxMessagesPerSession) : [];
+    const remaining = Math.max(0, CHAT_LIMITS.maxMessages - totalMessages);
+    session.messages = remaining ? messages.slice(-remaining) : [];
+    totalMessages += session.messages.length;
+  }
+}
+
+let chatSessions = loadChatSessions();
 const chatAttachments = [];
+let retryAttachments = [];
+let retrySessionId = '';
+let retryMessageTs = 0;
+let retryAttachmentTimer = null;
 
 function initChat() {
   loadModels();
   renderChatSessions();
 }
 
+function isStandardModelId(modelId) {
+  const normalized = String(modelId || '').toLowerCase().replace(/^models\//, '');
+  return !normalized.includes('rp') &&
+    !normalized.includes('roleplay') &&
+    !normalized.includes('role-play');
+}
+
 async function loadModels() {
   try {
     const res = await fetch('/v1/models', { headers: getAuthHeaders() });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const json = await res.json();
-    availableModels = json.data || [];
+    availableModels = Array.isArray(json.data)
+      ? json.data.filter(m => m && m.id && isStandardModelId(m.id))
+      : [];
     const sel = $('chatModelSelect');
     sel.innerHTML = '';
-    
-    const regular = availableModels;
-    if (regular.length) {
+
+    const appendGroup = (label, models) => {
+      if (!models.length) return;
       const g = document.createElement('optgroup');
-      g.label = '标准模型';
-      regular.forEach(m => {
+      g.label = label;
+      models.forEach(m => {
         const opt = document.createElement('option');
         opt.value = m.id;
         const styleLabel = m.description ? m.description.split('·')[1]?.trim() || m.id : m.id;
@@ -2494,13 +2838,20 @@ async function loadModels() {
         g.appendChild(opt);
       });
       sel.appendChild(g);
-    }
-    if (sel.options.length) sel.value = 'sakana-namazu';
-    $('chatModelBadge').textContent = sel.value || 'sakana-namazu';
-    sel.onchange = () => {
-      $('chatModelBadge').textContent = sel.value;
     };
-  } catch {}
+    appendGroup('标准模型', availableModels);
+    if (sel.options.length) sel.value = [...sel.options].some(o => o.value === 'sakana-namazu') ? 'sakana-namazu' : sel.options[0].value;
+    $('chatModelBadge').textContent = sel.value || 'sakana-namazu';
+    sel.onchange = () => { $('chatModelBadge').textContent = sel.value; };
+    $('modelMatrixCount').textContent = `${availableModels.length} 个可用模型`;
+    if (activeTab === 'models') renderModelMatrix();
+  } catch (e) {
+    // A transient model endpoint failure should leave the shell usable.
+    availableModels = [{ id: 'sakana-namazu', description: 'Namazu · Standard 🐟' }];
+    $('chatModelSelect').innerHTML = '<option value="sakana-namazu">sakana-namazu</option>';
+    $('chatModelBadge').textContent = 'sakana-namazu';
+    $('modelMatrixCount').textContent = '模型列表暂不可用';
+  }
 }
 
 function renderChatSessions() {
@@ -2526,6 +2877,7 @@ function renderChatSessions() {
 }
 
 function selectChatSession(id) {
+  if (retrySessionId && retrySessionId !== id) clearRetryAttachments();
   activeConversationId = id;
   const sess = chatSessions.find(s => s.id === id);
   if (!sess) return;
@@ -2541,6 +2893,7 @@ function selectChatSession(id) {
 }
 
 function createNewChatSession(title = '新聊天') {
+  clearRetryAttachments();
   const id = 'conv_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
   const sess = { id, title, messages: [], createdAt: Date.now() };
   chatSessions.unshift(sess);
@@ -2656,7 +3009,7 @@ function renderCharacterCards() {
     const item = document.createElement('div');
     item.className = 'preset-card';
     item.style.cssText = 'align-items:center;gap:8px;cursor:pointer';
-    if (activeCharacterCard && activeCharacterCard.id === c.id) item.style.outline = '1px solid var(--accent)';
+    if (activeCharacterCard && activeCharacterCard.id === c.id) item.style.outline = '1px solid var(--accent-color)';
     item.innerHTML = `
       <img src="/api/characters/${encodeURIComponent(c.id)}/avatar" alt="" style="width:26px;height:26px;border-radius:6px;object-fit:cover;flex:none">
       <div style="flex:1;min-width:0">
@@ -2727,7 +3080,7 @@ $('btnClearActiveCard').onclick = async () => {
 // 拖放上传角色卡(拖到角色卡区块)
 const cardDropZone = $('characterCardList');
 if (cardDropZone) {
-  cardDropZone.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); cardDropZone.style.outline = '1px dashed var(--accent)'; });
+  cardDropZone.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); cardDropZone.style.outline = '1px dashed var(--accent-color)'; });
   cardDropZone.addEventListener('dragleave', () => { cardDropZone.style.outline = ''; });
   cardDropZone.addEventListener('drop', (e) => {
     e.preventDefault();
@@ -2743,31 +3096,54 @@ if (cardDropZone) {
 loadCharacterCards();
 
 // Attachment handling (file picker + paste/drop into the input)
+const MAX_LIVE_ATTACHMENTS = 8;
+const MAX_LIVE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const MAX_LIVE_ATTACHMENT_TOTAL_BYTES = 40 * 1024 * 1024;
+
+function liveAttachmentBytes() {
+  return chatAttachments.reduce((total, file) => total + (Number(file?.bytes) || 0), 0);
+}
+
+function queueAttachmentFile(file, notify = false) {
+  if (!file) return;
+  if (chatAttachments.length >= MAX_LIVE_ATTACHMENTS) {
+    toast(`最多附加 ${MAX_LIVE_ATTACHMENTS} 个文件`, 'err');
+    return;
+  }
+  if (Number(file.size) > MAX_LIVE_ATTACHMENT_BYTES) {
+    toast(`附件不能超过 ${Math.round(MAX_LIVE_ATTACHMENT_BYTES / 1024 / 1024)} MB`, 'err');
+    return;
+  }
+  if (liveAttachmentBytes() + Number(file.size || 0) > MAX_LIVE_ATTACHMENT_TOTAL_BYTES) {
+    toast(`附件总大小不能超过 ${Math.round(MAX_LIVE_ATTACHMENT_TOTAL_BYTES / 1024 / 1024)} MB`, 'err');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    if (chatAttachments.length >= MAX_LIVE_ATTACHMENTS) return;
+    chatAttachments.push({
+      name: file.name || 'attachment',
+      dataUrl: reader.result,
+      type: file.type || 'application/octet-stream',
+      bytes: Number(file.size) || 0,
+    });
+    renderAttachmentsPreview();
+    if (notify) toast(`已附加 ${file.name || '剪贴板图片'}`);
+  };
+  reader.onerror = () => toast(`读取附件失败: ${file.name || 'attachment'}`, 'err');
+  reader.readAsDataURL(file);
+}
+
 $('btnAttachFile').onclick = () => $('fileUploadInput').click();
 $('fileUploadInput').onchange = (e) => {
-  for (const file of e.target.files) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      chatAttachments.push({ name: file.name, dataUrl: reader.result, type: file.type });
-      renderAttachmentsPreview();
-    };
-    reader.readAsDataURL(file);
-  }
+  for (const file of e.target.files || []) queueAttachmentFile(file);
   e.target.value = '';
 };
 $('chatInput').onpaste = (e) => {
   const files = [...(e.clipboardData?.files || [])];
   if (!files.length) return; // allow normal text paste
   e.preventDefault();
-  for (const file of files) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      chatAttachments.push({ name: file.name || 'pasted.png', dataUrl: reader.result, type: file.type });
-      renderAttachmentsPreview();
-      toast(`已附加 ${file.name || '剪贴板图片'}`);
-    };
-    reader.readAsDataURL(file);
-  }
+  for (const file of files) queueAttachmentFile(file, true);
 };
 document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => {
@@ -2776,25 +3152,85 @@ document.addEventListener('drop', (e) => {
   const inChat = e.target.closest?.('.chat-input-card, #chatViewport') || e.target.id === 'chatViewport';
   if (!inChat) return;
   e.preventDefault();
-  for (const file of files) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      chatAttachments.push({ name: file.name, dataUrl: reader.result, type: file.type });
-      renderAttachmentsPreview();
-    };
-    reader.readAsDataURL(file);
-  }
+  for (const file of files) queueAttachmentFile(file);
 });
 
-// Cap the base64 attachment size stored in localStorage: huge image dataUrls
-// blow past the 5MB quota on history save. The live message keeps it; the
-// persisted copy degrades to name-only (re-upload to re-attach).
+function setRetryAttachments(files, sessionId, messageTs) {
+  clearRetryAttachments();
+  const bounded = (Array.isArray(files) ? files : [])
+    .filter(file => file && typeof file.dataUrl === 'string' && file.dataUrl)
+    .slice(0, MAX_LIVE_ATTACHMENTS)
+    .map(file => ({
+      name: String(file.name || 'attachment').slice(0, 200),
+      type: String(file.type || 'application/octet-stream').slice(0, 120),
+      dataUrl: file.dataUrl,
+      bytes: Number(file.bytes) || 0,
+    }));
+  if (!bounded.length) return;
+  retryAttachments = bounded;
+  retrySessionId = String(sessionId || '');
+  retryMessageTs = Number(messageTs) || 0;
+  retryAttachmentTimer = setTimeout(clearRetryAttachments, 5 * 60 * 1000);
+  retryAttachmentTimer.unref?.();
+}
+
+function clearRetryAttachments() {
+  if (retryAttachmentTimer) clearTimeout(retryAttachmentTimer);
+  retryAttachmentTimer = null;
+  for (const file of retryAttachments) if (file) file.dataUrl = null;
+  retryAttachments = [];
+  retrySessionId = '';
+  retryMessageTs = 0;
+}
+
+function clearAttachmentDataFromDom(root) {
+  if (!root) return;
+  root.querySelectorAll('img[src^="data:"]').forEach((img) => {
+    const placeholder = document.createElement('span');
+    placeholder.className = 'attachment-placeholder';
+    placeholder.textContent = '附件';
+    img.replaceWith(placeholder);
+  });
+}
+
+function releaseMessageAttachments(message) {
+  if (!message || !Array.isArray(message.files)) return;
+  message.files = message.files.map(f => f && ({
+    name: String(f.name || 'attachment').slice(0, 200),
+    type: String(f.type || 'application/octet-stream').slice(0, 120),
+    dataUrl: null,
+  })).filter(Boolean);
+}
+
+function releaseAttachmentFiles(files) {
+  for (const file of files || []) {
+    if (file && typeof file === 'object') file.dataUrl = null;
+  }
+}
+
+function releaseAllLiveAttachments() {
+  for (const session of chatSessions || []) {
+    for (const message of session.messages || []) releaseMessageAttachments(message);
+  }
+  releaseAttachmentFiles(chatAttachments);
+  chatAttachments.length = 0;
+  clearRetryAttachments();
+}
+
+window.addEventListener('pagehide', releaseAllLiveAttachments);
+window.addEventListener('beforeunload', releaseAllLiveAttachments);
+
+// Bound attachment metadata in persisted sessions. Raw data is request-scoped.
 const MAX_STORED_ATTACHMENT = 250 * 1024;
 function sanitizeAttachmentsForStore(files) {
   return (files || []).map(f => {
-    if (!f || !f.dataUrl || f.dataUrl.length <= MAX_STORED_ATTACHMENT) return f;
-    return { name: f.name, type: f.type, dataUrl: null };
-  });
+    if (!f || typeof f !== 'object') return null;
+    return {
+      name: String(f.name || 'attachment').slice(0, 200),
+      type: String(f.type || 'application/octet-stream').slice(0, 120),
+      dataUrl: null,
+    };
+  }).filter(Boolean).slice(0, 12);
 }
 
 function renderAttachmentsPreview() {
@@ -2917,6 +3353,7 @@ function messageToContent(m) {
 function stopChatGeneration() {
   if (!isGenerating) return;
   abortedByUser = true;
+  clearRetryAttachments();
   try { activeAbort?.abort(); } catch {}
   const sess = chatSessions.find(s => s.id === activeConversationId);
   if (sess && sess.conversationId) {
@@ -2927,31 +3364,43 @@ function stopChatGeneration() {
   }
 }
 
-async function sendChatMessage() {
+async function sendChatMessage({ fromRetry = false } = {}) {
   const input = $('chatInput');
   const text = input.value.trim();
-  if (!text && !chatAttachments.length) return;
 
-  // Buttons shows "⏹ 停止" while generating — clicking now stops instead.
+  // The send button becomes the stop button while a request is active, even
+  // when the composer is empty.
   if (isGenerating) { stopChatGeneration(); return; }
+
+  const retryEligible = fromRetry && retrySessionId && retrySessionId === activeConversationId;
+  const hasRetryAttachments = retryEligible && retryAttachments.length > 0;
+  if (!fromRetry && !text && !chatAttachments.length) return;
+  if (fromRetry && !text && !hasRetryAttachments) return;
+  if (!fromRetry) clearRetryAttachments();
 
   if (!activeConversationId) createNewChatSession();
   const currentSess = chatSessions.find(s => s.id === activeConversationId);
 
-  const savedFiles = [...chatAttachments];
+  let savedFiles;
+  if (fromRetry) {
+    savedFiles = retryEligible ? retryAttachments.map(f => ({ ...f })) : [];
+    clearRetryAttachments();
+  } else {
+    savedFiles = [...chatAttachments];
+  }
   chatAttachments.length = 0;
   renderAttachmentsPreview();
   input.value = '';
   input.style.height = 'auto';
 
-  appendMsgToUI('user', text, '', [], savedFiles);
-  currentSess.messages.push({ role: 'user', content: text, files: savedFiles, ts: Date.now() });
+  const userRow = appendMsgToUI('user', text, '', [], savedFiles);
+  const userMessageTs = Date.now();
+  currentSess.messages.push({ role: 'user', content: text, files: savedFiles, ts: userMessageTs });
   if (currentSess.messages.length === 1 && text) {
     currentSess.title = text.slice(0, 18);
     $('chatCurrentTitle').textContent = currentSess.title;
     renderChatSessions();
   }
-  saveChatSessions();
 
   isGenerating = true;
   abortedByUser = false;
@@ -2980,12 +3429,18 @@ async function sendChatMessage() {
     web_search: isSearchActive,
     enable_thinking: isThinkActive,
   };
+  // Serialize the one-shot attachment payload before releasing raw bytes from
+  // the live session. The request body is now the only owner of the Data URL.
+  const requestPayload = JSON.stringify(reqBody);
+  releaseMessageAttachments(currentSess.messages[currentSess.messages.length - 1]);
+  saveChatSessions();
+  clearAttachmentDataFromDom(userRow);
 
   try {
     const resp = await fetch('/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify(reqBody),
+      body: requestPayload,
       signal: ctrl.signal,
     });
 
@@ -3077,6 +3532,7 @@ async function sendChatMessage() {
   } catch (e) {
     bodyContentEl.classList.remove('typing-cursor');
     if (e.name === 'AbortError' && abortedByUser) {
+      clearRetryAttachments();
       // User pressed stop — keep whatever streamed so far.
       if (aiAnswer || aiReasoning) {
         bodyContentEl.innerHTML = renderMarkdown(aiAnswer);
@@ -3086,10 +3542,12 @@ async function sendChatMessage() {
         bodyContentEl.innerHTML = '<span style="color:var(--text-dim)">⏹ 已停止生成</span>';
       }
     } else {
+      setRetryAttachments(savedFiles, currentSess.id, userMessageTs);
       bodyContentEl.innerHTML = `<span style="color:var(--rose)">⚠️ 请求发生错误: ${esc(e.message)}</span> <button class="btn sm" style="margin-left:8px" onclick="retryLastChatMessage()">🔄 重试</button>`;
     }
   }
 
+  releaseAttachmentFiles(savedFiles);
   isGenerating = false;
   activeAbort = null;
   $('btnSendChat').textContent = '↑ 发送';
@@ -3105,30 +3563,41 @@ window.retryLastChatMessage = function() {
     if (sess.messages[i].role === 'user') { lastUserIdx = i; break; }
   }
   if (lastUserIdx === -1) return;
-  // Remove the failed assistant turn (everything after the last user msg).
-  sess.messages = sess.messages.slice(0, lastUserIdx + 1);
-  // Restore attachments into the input so they are sent again.
   const lastUser = sess.messages[lastUserIdx];
-  if (lastUser && lastUser.files && lastUser.files.length) {
-    lastUser.files.forEach(f => {
-      if (f.dataUrl) chatAttachments.push({ name: f.name, dataUrl: f.dataUrl, type: f.type || '' });
-    });
-    renderAttachmentsPreview();
-  }
+  const canRetry = retrySessionId === sess.id && retryMessageTs === Number(lastUser.ts);
+  if (!lastUser || (!lastUser.content && !canRetry)) return;
+
+  // Remove the failed assistant turn and the metadata-only copy of the failed
+  // user turn. sendChatMessage() appends one clean turn for the retry.
+  sess.messages = sess.messages.slice(0, lastUserIdx);
   saveChatSessions();
   selectChatSession(activeConversationId);
-  if (lastUser && lastUser.content) {
-    $('chatInput').value = lastUser.content;
-    $('chatInput').style.height = 'auto';
-    sendChatMessage();
-  }
+
+  $('chatInput').value = lastUser.content || '';
+  $('chatInput').style.height = 'auto';
+  sendChatMessage({ fromRetry: canRetry });
 };
 
 function saveChatSessions() {
+  const bounded = limitChatSessions(chatSessions);
   try {
-    const snapshot = chatSessions.map(s => ({ ...s, messages: (s.messages || []).map(m => ({ ...m, files: sanitizeAttachmentsForStore(m.files) })) }));
-    localStorage.setItem('sakana_chat_sessions', JSON.stringify(snapshot));
-  } catch {}
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(bounded));
+  } catch {
+    // Retry with an even smaller metadata-only representation if quota is full.
+    try {
+      const minimal = bounded.map(s => ({
+        ...s,
+        messages: s.messages.map(m => ({
+          ...m,
+          content: m.content.slice(0, 2000),
+          reasoning: '',
+          citations: [],
+          files: sanitizeAttachmentsForStore(m.files),
+        })),
+      }));
+      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(limitChatSessions(minimal)));
+    } catch {}
+  }
 }
 
 $('btnSendChat').onclick = sendChatMessage;
@@ -3148,12 +3617,13 @@ $('chatInput').oninput = () => {
 function renderModelMatrix() {
   const grid = $('modelMatrixGrid');
   grid.innerHTML = '';
-  if (!availableModels.length) {
+  const models = availableModels.filter(m => m && isStandardModelId(m.id));
+  if (!models.length) {
     grid.innerHTML = '<div class="card-panel" style="grid-column:1/-1;text-align:center;color:var(--text-dim)">加载模型列表中...</div>';
     return;
   }
 
-  availableModels.forEach(m => {
+  models.forEach(m => {
     const card = document.createElement('div');
     card.className = 'model-card';
     const isFugu = m.id.includes('fugu');
@@ -3169,7 +3639,7 @@ function renderModelMatrix() {
         <div class="model-card-tags" style="margin-bottom:12px">
           <span class="pill blue">上下文 128k</span>
           <span class="pill on">免费无限制</span>
-          <span class="pill purple">深度思考</span>
+          <span class="pill info">深度思考</span>
         </div>
         <div style="display:flex;gap:6px">
           <button class="btn sm primary" style="flex:1" onclick="useModelInChat('${m.id}')">在聊天中打开</button>
@@ -3182,6 +3652,10 @@ function renderModelMatrix() {
 }
 
 window.useModelInChat = function(modelId) {
+  if (!isStandardModelId(modelId)) {
+    toast('该模型已禁用', 'err');
+    return;
+  }
   switchTab('chat');
   if ($('chatModelSelect')) $('chatModelSelect').value = modelId;
   $('chatModelBadge').textContent = modelId;
@@ -3398,8 +3872,21 @@ $('btnClearAuditLogs').onclick = async () => {
 window.viewAuditDetail = function(id) {
   const e = auditLogs.find(x => x.id === id);
   if (!e) return;
-  $('modalAuditReq').textContent = e.reqBody || '无 Payload';
-  $('modalAuditRes').textContent = (e.error ? `[ERROR] ${e.error}\n\n` : '') + (e.resBody || '无响应体记录');
+  const headers = e.headers || e.requestHeaders || e.responseHeaders || null;
+  const requestMeta = {
+    method: e.method || '—',
+    path: e.path || '—',
+    model: e.model || '—',
+    status: e.status ?? '—',
+    duration: e.duration != null ? `${e.duration}ms` : '—',
+    timestamp: e.ts ? new Date(e.ts).toISOString() : '—',
+  };
+  $('modalAuditReq').textContent = JSON.stringify(requestMeta, null, 2);
+  $('modalAuditRes').textContent = JSON.stringify({
+    status: e.status ?? '—',
+    error: e.error || null,
+    headers: headers && typeof headers === 'object' ? headers : '未记录响应头',
+  }, null, 2);
   $('auditDetailModal').hidden = false;
 };
 $('btnCloseAuditModal').onclick = () => $('auditDetailModal').hidden = true;
@@ -3407,16 +3894,8 @@ $('btnCloseAuditModal').onclick = () => $('auditDetailModal').hidden = true;
 /* ================= TAB 7: SETTINGS & HEALTH ================= */
 $('settingBaseUrl').value = `${location.origin}/v1`;
 
-$('btnThemeDark').onclick = () => {
-  document.body.classList.remove('theme-light');
-  $('btnThemeDark').classList.add('active');
-  $('btnThemeLight').classList.remove('active');
-};
-$('btnThemeLight').onclick = () => {
-  document.body.classList.add('theme-light');
-  $('btnThemeLight').classList.add('active');
-  $('btnThemeDark').classList.remove('active');
-};
+$('btnThemeDark').onclick = () => applyTheme('dark');
+$('btnThemeLight').onclick = () => applyTheme('light');
 
 $('btnClearCache').onclick = async () => {
   try {
@@ -3434,7 +3913,7 @@ $('btnTestPing').onclick = async () => {
     const res = await fetch('/health');
     const ms = Math.round(performance.now() - start);
     if (res.ok) {
-      $('settingPingStats').innerHTML = `<span style="color:var(--emerald-glow)">🟢 本地服务响应: ${ms}ms · Upstream 连接正常</span>`;
+      $('settingPingStats').innerHTML = `<span style="color:var(--accent-strong)">🟢 本地服务响应: ${ms}ms · Upstream 连接正常</span>`;
       $('sidebarStatusText').textContent = `在线 ${ms}ms`;
       toast(`延迟测速: ${ms}ms`);
     }
@@ -3463,6 +3942,7 @@ async function checkHealth() {
 }
 
 // Global bootstrap
+applyTheme(readStoredTheme(), false);
 initChat();
 refreshStats();
 checkHealth();

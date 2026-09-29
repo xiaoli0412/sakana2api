@@ -3,20 +3,38 @@ node_modules/
 .zcode/
 .playwright-mcp/
 .browser-profile/
+.chrome-sakana-profile/
+character_cards/
 runtime/
 
-# Runtime state and credentials are preserved outside source archives.
+# Runtime state and credentials
 .env
 .env.*
-session.json
-account_pool.json
+!.env.example
+session*.json
 account_pool*.json
-account_pool.remote.json
-tokens.json
-keys.json
-tempmail.json
-server.log
+tokens*.json
+keys*.json
+tempmail*.json
+mailtoken*.json
+mailmsg*.json
 *.log
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.7z
+*.rar
+*.bak
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.pem
+*.key
+*.p12
+*.pfx
 .ssh_secret.json
 scripts/.ssh_secret.json
 

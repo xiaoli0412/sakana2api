@@ -48,6 +48,41 @@ red64.png
 
 # Node
 node_modules/
+__pycache__/
+
+# Environment and runtime state
+.env
+.env.*
+!.env.example
+runtime/
+.zcode/
+character_cards/
+
+# Archives, databases, logs and credentials
+*.log
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.7z
+*.rar
+*.bak
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.pem
+*.key
+*.p12
+*.pfx
+session*.json
+account_pool*.json
+tokens*.json
+keys*.json
+tempmail*.json
+mailtoken*.json
+mailmsg*.json
 
 # SSH credentials (local only)
 scripts/.ssh_secret.json

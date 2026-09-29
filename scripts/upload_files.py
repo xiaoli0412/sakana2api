@@ -11,9 +11,9 @@ try:
         cfg = json.load(f)
 except FileNotFoundError:
     cfg = {}
-HOST = os.environ.get('SAKANA_SSH_HOST', cfg.get('HOST', '38.76.190.150'))
+HOST = os.environ.get('SAKANA_SSH_HOST', cfg.get('HOST', ''))
 PORT = int(os.environ.get('SAKANA_SSH_PORT', cfg.get('PORT', 22)))
-USER = os.environ.get('SAKANA_SSH_USER', cfg.get('USER', 'root'))
+USER = os.environ.get('SAKANA_SSH_USER', cfg.get('USER', ''))
 PASS = os.environ.get('SAKANA_SSH_PASS', cfg.get('PASS', ''))
 REMOTE = '/root/sakana-2api'
 LOCAL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,8 +21,12 @@ LOCAL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 files = sys.argv[1:] or ['lib/auto-session.js', 'lib/translate.js', 'server.js',
                          '.gitignore', 'package.json', 'package-lock.json']
 
+if not HOST or not USER:
+    raise SystemExit('Set SAKANA_SSH_HOST and SAKANA_SSH_USER before uploading')
+
 ssh = paramiko.SSHClient()
-ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+ssh.load_system_host_keys()
+ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
 ssh.connect(HOST, PORT, USER, PASS, look_for_keys=False, allow_agent=False, timeout=20)
 print('Connected')
 

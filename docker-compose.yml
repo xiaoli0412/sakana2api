@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sakana-2api:0.13.0
+    image: sakana-2api:0.14.0
     container_name: sakana-2api
     restart: unless-stopped
     init: true

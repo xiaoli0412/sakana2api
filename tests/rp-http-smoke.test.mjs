@@ -67,7 +67,10 @@ try {
     ['responses', '/v1/responses', { model: 'sakana-namazu:rp', input: 'nope', stream: false }],
     ['anthropic', '/v1/messages', { model: 'sakana-namazu-rp', max_tokens: 20, messages: [{ role: 'user', content: 'nope' }] }],
     ['gemini route', '/v1beta/models/sakana-namazu-rp:generateContent', { contents: [{ role: 'user', parts: [{ text: 'nope' }] }] }],
-    ['gemini body', '/v1beta/models/gemini-2.5-flash:generateContent', { model: 'sakana-fugu-rp', contents: [{ role: 'user', parts: [{ text: 'nope' }] }] }],
+    ['chat alias', '/v1/chat/completions', { model: 'sakana-namazu-rp2', messages: [{ role: 'user', content: 'nope' }], stream: false }],
+    ['chat joined alias', '/v1/chat/completions', { model: 'sakana-namazurp', messages: [{ role: 'user', content: 'nope' }], stream: false }],
+    ['gemini alias route', '/v1beta/models/sakana-fugu-rp2:generateContent', { contents: [{ role: 'user', parts: [{ text: 'nope' }] }] }],
+    ['gemini alias body', '/v1beta/models/gemini-2.5-flash:generateContent', { model: 'sakana-namazurp', contents: [{ role: 'user', parts: [{ text: 'nope' }] }] }],
   ];
 
   for (const [name, pathname, body] of cases) {

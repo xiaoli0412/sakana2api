@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 
 const read = relative => fs.readFileSync(new URL(relative, import.meta.url), 'utf8');
 const entrypoint = read('../docker-entrypoint.sh');
@@ -29,8 +30,13 @@ for (const [name, source] of deploySources) {
   for (const basename of ['session.json', 'account_pool.json', 'account_pool.remote.json', 'keys.json', 'tempmail.json', 'tokens.json']) {
     assert.match(source, new RegExp(`['"]${basename.replace('.', '\\.') }['"]`), `${name} must exclude ${basename}`);
   }
-  assert.match(source, /EXCLUDE_BASENAMES\s*=\s*set\(RUNTIME_STATE_BASENAMES\)\s*\|\s*\{['"]\.ssh_secret\.json['"],\s*['"]server\.log['"]\}/);
-  assert.ok(source.includes("EXCLUDE_RELATIVE_PATHS = {'runtime', 'scripts/.ssh_secret.json'}"), `${name} must exclude SSH secret path`);
+  assert.match(source, /EXCLUDE_BASENAMES\s*=\s*set\(RUNTIME_STATE_BASENAMES\)\s*\|\s*\{/ , `${name} must derive exclusions from runtime basenames`);
+  assert.match(source, /\.ssh_secret\.json/);
+  assert.match(source, /server\.log/);
+  assert.match(source, /EXCLUDE_SUFFIXES\s*=\s*\(/);
+  assert.match(source, /\.pem/);
+  assert.match(source, /\.pfx/);
+  assert.ok(source.includes("'runtime', 'scripts/.ssh_secret.json'"), `${name} must exclude SSH secret path`);
   assert.match(source, /PROJECT_ROOT\s*=\s*Path\(__file__\)\.resolve\(\)\.parents\[1\]/);
   assert.match(source, /is_env_file\(.*basename/);
   assert.match(source, /RejectPolicy\(\)/);
@@ -46,9 +52,18 @@ for (const [name, source] of deploySources) {
 assert.match(dockerignore, /^runtime\/$/m);
 assert.match(dockerignore, /^\.ssh_secret\.json$/m);
 assert.match(dockerignore, /^scripts\/\.ssh_secret\.json$/m);
-for (const path of ['session.json', 'account_pool.json', 'keys.json', 'tempmail.json']) {
-  assert.match(dockerignore, new RegExp(`^${path.replace('.', '\\.')}$`, 'm'));
+for (const pattern of ['session*.json', 'account_pool*.json', 'keys*.json', 'tempmail*.json']) {
+  assert.ok(dockerignore.split(/\r?\n/).includes(pattern), `dockerignore must exclude ${pattern}`);
 }
 assert.match(dockerignore, /^\.browser-profile\/$/m);
+
+const archiveProbe = spawnSync(process.execPath, ['-e', `
+const fs = require('node:fs');
+const source = fs.readFileSync('scripts/deploy_v2.py', 'utf8');
+for (const name of ['session.json', 'account_pool.json', 'tokens.json', 'keys.json', '.env', 'scripts/.ssh_secret.json']) {
+  if (!source.includes(name)) process.exit(2);
+}
+`,], { cwd: new URL('..', import.meta.url), encoding: 'utf8' });
+assert.equal(archiveProbe.status, 0, 'deployment archive exclusions are present');
 
 console.log('container config tests: all passed');
