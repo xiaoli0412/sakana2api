@@ -11,8 +11,8 @@ const avatarPng = Buffer.from(
   'base64',
 );
 const models = [
-  { id: 'sakana-namazu', description: 'Namazu · Standard 🐟' },
-  { id: 'sakana-fugu', description: 'Fugu · Standard 🐡' },
+  { id: 'sakana', description: 'Sakana · 标准对话 · 深度思考' },
+  { id: 'sakana-mini', description: 'Sakana Mini · 轻量快速 · 深度思考' },
   { id: 'sakana-namazu-rp2', description: 'legacy roleplay model' },
 ];
 const card = { id: 'card-local', name: '小红', description: '本地测试角色卡' };
@@ -147,7 +147,7 @@ try {
   await page.waitForFunction(() => !document.getElementById('activeCardBar').hidden, null, { timeout: 10_000 });
   if (!(await page.locator('#activeCardName').textContent()).includes('小红')) throw new Error('character card activation failed');
 
-  await page.selectOption('#chatModelSelect', 'sakana-fugu');
+  await page.selectOption('#chatModelSelect', 'sakana-mini');
   await page.fill('#chatInput', '我们点什么甜品好呢?');
   await page.click('#btnSendChat');
   await page.waitForFunction(() => document.querySelector('#chatMessages')?.textContent.includes('甜品店测试回复'), null, { timeout: 10_000 });

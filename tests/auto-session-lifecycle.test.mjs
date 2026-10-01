@@ -116,6 +116,25 @@ await assert.rejects(
 );
 assert.equal(exhausted, 3, 'recovery stops after the configured attempts');
 
+// A stop can race an isolated chromium launch. The launch promise itself is
+// not cancelable, so a browser resolving after stop must still be closed.
+let resolveIsolatedLaunch;
+let lateBrowserCloseCount = 0;
+autoSession.__testing.reset();
+autoSession.__testing.setIsolatedLauncher(() => new Promise((resolve) => {
+  resolveIsolatedLaunch = resolve;
+}));
+const pendingIsolatedHarvest = autoSession.harvestFreshIsolated();
+await new Promise((resolve) => setImmediate(resolve));
+await autoSession.stop();
+await assert.rejects(() => pendingIsolatedHarvest, /auto-session stopped/);
+resolveIsolatedLaunch({
+  async close() { lateBrowserCloseCount++; },
+});
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(lateBrowserCloseCount, 1, 'late isolated browser launch is closed after stop');
+
+autoSession.__testing.setIsolatedLauncher(null);
 autoSession.__testing.setLauncher(null);
 autoSession.__testing.setWait(null);
 await autoSession.stop();

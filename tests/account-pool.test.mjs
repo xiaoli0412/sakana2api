@@ -77,6 +77,17 @@ console.log('== account-pool regression tests ==');
   check('T3 pool holds 2 entries', pool.count() === 2, `got ${pool.count()}`);
 }
 
+// ---- TEST 3b: cookie identity wins over stale uid/email metadata ----
+{
+  const dir = tmpDir();
+  const pool = new AccountPool(path.join(dir, 'account_pool.json'), path.join(dir, 'session.json'));
+  const first = pool.add({ uid: 'UID-OLD', email: 'old@x.com', cookieHeader: 'sakana-chat=same-cookie; a=b', cookies: [], savedAt: Date.now(), state: 'active' });
+  const duplicate = pool.add({ uid: 'UID-NEW', email: 'new@x.com', cookieHeader: 'sakana-chat=same-cookie; a=b', cookies: [], savedAt: Date.now(), state: 'active' });
+  check('T3b first same-cookie session is accepted', !!first);
+  check('T3b same cookie with changed metadata is rejected', duplicate === null, `duplicate=${duplicate}`);
+  check('T3b same cookie occupies one pool slot', pool.count() === 1, `got ${pool.count()}`);
+}
+
 // ---- TEST 4: applyRefresh (the real production refresh path) must NOT overwrite identity ----
 {
   const dir = tmpDir();
@@ -105,7 +116,18 @@ console.log('== account-pool regression tests ==');
   check('T5 save/load round-trip keeps all 10 same-uid distinct sessions', reloaded.count() === 10, `got ${reloaded.count()}`);
 }
 
-// ---- TEST 6: injectable min/max (20-account target) ----
+// ---- TEST 5b: session sync dedupes by cookie when identity metadata changes ----
+{
+  const dir = tmpDir();
+  const poolFile = path.join(dir, 'account_pool.json');
+  const sessionFile = path.join(dir, 'session.json');
+  fs.writeFileSync(poolFile, JSON.stringify([{ uid: 'old-uid', email: 'old@example.com', cookieHeader: 'sakana-chat=same-cookie', cookies: [], savedAt: 1, state: 'active' }]));
+  fs.writeFileSync(sessionFile, JSON.stringify({ uid: 'new-uid', email: 'new@example.com', cookieHeader: 'sakana-chat=same-cookie', cookies: [], savedAt: 2, loggedIn: true }));
+  const pool = new AccountPool(poolFile, sessionFile);
+  check('T5b same cookie does not create duplicate after restart', pool.count() === 1, `got ${pool.count()}`);
+  check('T5b newer identity metadata is merged', pool.accounts[0]?.uid === 'old-uid' && pool.accounts[0]?.email === 'old@example.com');
+}
+
 {
   const dir = tmpDir();
   const pool = new AccountPool(path.join(dir, 'account_pool.json'), path.join(dir, 'session.json'), { minPool: 20, maxPool: 20 });
@@ -231,6 +253,27 @@ await (async () => {
     async () => null,
   );
   check('T12 duplicate replacement keeps old slot for diagnosis', pool.accounts.some(a => a.id === id && a.state === 'expired'));
+})();
+
+// ---- TEST 13: opt-in harvest workers are bounded and fill exact deficit ----
+await (async () => {
+  const dir = tmpDir();
+  const pool = new AccountPool(path.join(dir, 'account_pool.json'), path.join(dir, 'session.json'), {
+    minPool: 5, maxPool: 5, harvestConcurrency: 3, harvestRetries: 1, harvestRetryDelayMs: 0,
+  });
+  let calls = 0;
+  let active = 0;
+  let maxActive = 0;
+  const result = await pool.ensureMinPool(async () => {
+    const n = ++calls;
+    active++;
+    maxActive = Math.max(maxActive, active);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    active--;
+    return { uid: `parallel-${n}`, email: `parallel-${n}@example.com`, cookieHeader: `sakana-chat=parallel-${n}`, cookies: [] };
+  });
+  check('T13 opt-in workers fill exact deficit', result === 5 && pool.activeCount() === 5, `result=${result} active=${pool.activeCount()}`);
+  check('T13 worker count is bounded', maxActive === 3, `maxActive=${maxActive}`);
 })();
 
 process.exit(failures ? 1 : 0);

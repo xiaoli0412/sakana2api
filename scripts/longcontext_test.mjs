@@ -5,8 +5,12 @@
 //     clean upstream answer or a clean 4xx/5xx JSON error — never hang/ECONNRESET)
 //  2. long multi-turn conversation (12 turns) reusing conversation_id
 //  3. a burst of 5 in-parallel turns on the SAME conversation (pinning stress)
-const base = process.argv[2] || process.env.BASE_URL || 'http://127.0.0.1:8799';
-const key = process.argv[3] || process.env.SAKANA_TEST_KEY || '';
+const base = String(process.env.SAKANA_TEST_BASE || '').replace(/\/$/, '');
+const key = String(process.env.SAKANA_TEST_KEY || '');
+if (!base || !key || process.env.BENCHMARK_CONFIRM !== '1') {
+  throw new Error('Set SAKANA_TEST_BASE, SAKANA_TEST_KEY, and BENCHMARK_CONFIRM=1 for authorized long-context tests');
+}
+const PARALLEL_SAME_CONVERSATION = process.env.BENCHMARK_PARALLEL_SAME_CONVERSATION === '1';
 
 let pass = 0, fail = 0;
 function check(name, cond, detail = '') {
@@ -71,7 +75,7 @@ let sharedConvId = null; // carried from scenario 2 (conversation_id reuse) into
 {
   console.log('\n[1] single 200KB prompt (non-stream)');
   const filler = '这是一段用于测试超长上下文处理的填充文本。'.repeat(12000); // ~240KB
-  const body = { model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: `${filler}\n\n请在回复开头说"收到超长输入"。` }], enable_thinking: false, web_search: false };
+  const body = { model: 'sakana-writer', stream: false, messages: [{ role: 'user', content: `${filler}\n\n请在回复开头说"收到超长输入"。` }], enable_thinking: false, web_search: false };
   const r = await chat(body);
   check('proxy responds (no hang/crash)', r.status !== 0, `netErr=${r.netErr}`);
   check('response is 2xx or a clean JSON error', r.status >= 200 && r.status < 500 || (r.status >= 400 && r.status < 500), `status=${r.status}`);
@@ -86,7 +90,7 @@ let sharedConvId = null; // carried from scenario 2 (conversation_id reuse) into
   let ok = true, last = '';
   const turns = ['第一轮:请记住关键词"蓝鲸",回复"记住了1"', '第二轮:我刚才说的关键词是什么?只回答关键词', '第三轮:把关键词倒过来念一遍', '第四轮:关键词第一个字是什么?', '第五轮:再复述一次关键词,然后回复"OK5"', '第六轮:关键词的英文是什么?不知道就回复"不知道"', '第七轮:回复"第七轮完成"', '第八轮:回复数字8', '第九轮:回复数字9', '第十轮:回复数字10', '第十一轮:回复"快结束了"', '第十二轮:最后复述一遍关键词'];
   for (let i = 0; i < turns.length; i++) {
-    const body = { model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: turns[i] }], enable_thinking: false, web_search: false };
+    const body = { model: 'sakana-writer', stream: false, messages: [{ role: 'user', content: turns[i] }], enable_thinking: false, web_search: false };
     if (convId) body.conversation_id = convId;
     const j = await (async () => {
       const resp = await fetch(base + '/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', ...(key ? { authorization: 'Bearer ' + key } : {}) }, body: JSON.stringify(body) });
@@ -103,15 +107,21 @@ let sharedConvId = null; // carried from scenario 2 (conversation_id reuse) into
   sharedConvId = convId;
 }
 
-// Scenario 3: 5 parallel turns on the SAME conversation (account pinning under concurrency)
+// Scenario 3: same-conversation turns. Parallel mode is separately opt-in because
+// the upstream conversation tree may reject concurrent writes by design.
 {
-  console.log('\n[3] 5 parallel turns on same conversation');
-  const bodies = [1, 2, 3, 4, 5].map(n => ({ model: 'sakana-namazu', stream: true, conversation_id: sharedConvId || undefined, messages: [{ role: 'user', content: `并发延续 #${n}:回复数字${n}即可` }], enable_thinking: false, web_search: false }));
-  const rs = await Promise.all(bodies.map(b => chat(b, 120000)));
+  console.log(`\n[3] same-conversation turns (${PARALLEL_SAME_CONVERSATION ? 'parallel' : 'sequential'})`);
+  const bodies = [1, 2, 3, 4, 5].map(n => ({ model: 'sakana-writer', stream: true, conversation_id: sharedConvId || undefined, messages: [{ role: 'user', content: `延续 #${n}:回复数字${n}即可` }], enable_thinking: false, web_search: false }));
+  const rs = PARALLEL_SAME_CONVERSATION
+    ? await Promise.all(bodies.map(b => chat(b, 120000)))
+    : [];
+  if (!PARALLEL_SAME_CONVERSATION) {
+    for (const body of bodies) rs.push(await chat(body, 120000));
+  }
   const oks = rs.filter(r => r.status === 200 && r.text.length > 0).length;
   rs.forEach((r, i) => console.log(`  req${i + 1}: status=${r.status} len=${(r.text || '').length} "${(r.text || r.netErr || '').slice(0, 40)}"`));
-  check('same-conversation parallel turns do not crash proxy', rs.every(r => r.status !== 0));
-  console.log(`  (${oks}/5 got 200-with-text — same-tree parallel turns may hit upstream CONV locks, proxy must stay healthy)`);
+  check('same-conversation turns do not crash proxy', rs.every(r => r.status !== 0));
+  console.log(`  (${oks}/5 got 200-with-text — parallel mode is opt-in)`);
 }
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);

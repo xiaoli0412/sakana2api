@@ -1,7 +1,7 @@
 // Full OpenAI-compatible E2E through the proxy (Node client, UTF-8 safe).
 const BASE = 'http://127.0.0.1:8787';
 
-async function chat({ stream = true, messages, model = 'sakana-namazu', extra = {} } = {}) {
+async function chat({ stream = true, messages, model = 'sakana', extra = {} } = {}) {
   const body = { model, messages, stream, ...extra };
   const resp = await fetch(BASE + '/v1/chat/completions', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),

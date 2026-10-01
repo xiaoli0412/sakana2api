@@ -1,4 +1,4 @@
-// Deterministic local UI smoke for the v0.14 refresh. It never contacts the
+// Deterministic local UI smoke for the v0.15 refresh. It never contacts the
 // production host or an upstream model; all browser API calls are mocked.
 import { chromium } from 'playwright';
 import { readFile } from 'node:fs/promises';
@@ -7,11 +7,17 @@ import { createServer } from 'node:http';
 const root = new URL('..', import.meta.url);
 const html = await readFile(new URL('public/index.html', root), 'utf8');
 const models = [
-  { id: 'sakana-namazu', description: 'Namazu · Standard 🐟' },
-  { id: 'sakana-fugu', description: 'Fugu · Standard 🐡' },
+  { id: 'sakana', description: 'Sakana · 标准对话 · 深度思考' },
+  { id: 'sakana-mini', description: 'Sakana Mini · 轻量快速 · 深度思考' },
+  { id: 'sakana-code', description: 'Sakana Code · 编程 · 长思维链 · 工具强化 · 先搜后想' },
+  { id: 'sakana-code-mini', description: 'Sakana Code Mini · 编程轻量 · 工具强化 · 先搜后想' },
+  { id: 'sakana-writer', description: 'Sakana Writer · 超长文本写作 · 上下文压缩管线' },
+  { id: 'sakana-writer-mini', description: 'Sakana Writer Mini · 写作轻量 · 上下文压缩管线' },
+  { id: 'sakana-polite', description: 'Sakana Polite · 敬语风格 · 深度思考' },
+  { id: 'sakana-osaka', description: 'Sakana Osaka · Osaka 风格 · 深度思考' },
   { id: 'sakana-namazu-rp2', description: 'legacy roleplay model' },
 ];
-const audit = [{ id: 'smoke-1', ts: Date.now(), method: 'POST', path: '/v1/chat/completions', model: 'sakana-namazu', status: 200, duration: 42, error: null }];
+const audit = [{ id: 'smoke-1', ts: Date.now(), method: 'POST', path: '/v1/chat/completions', model: 'sakana', status: 200, duration: 42, error: null }];
 const requestBodies = [];
 let chatRequests = 0;
 
@@ -76,12 +82,18 @@ try {
     tabs: document.querySelectorAll('[data-tab]').length,
     options: document.querySelectorAll('#chatModelSelect option').length,
     hasRpOption: [...document.querySelectorAll('#chatModelSelect option')].some(option => /rp|roleplay/i.test(option.value)),
+    togglesRemoved: !document.getElementById('btnToggleSearch') && !document.getElementById('btnToggleThink'),
+    badgeRemoved: !document.getElementById('chatModelBadge'),
+    styleSelect: !!document.getElementById('chatStyleSelect'),
   }));
-  if (!initial.noRemoteFonts || initial.panes < 8 || initial.tabs < 8 || initial.options !== 2 || initial.hasRpOption) throw new Error(`unexpected initial UI: ${JSON.stringify(initial)}`);
+  if (!initial.noRemoteFonts || initial.panes < 8 || initial.tabs < 8 || initial.options !== 8 || initial.hasRpOption) throw new Error(`unexpected initial UI: ${JSON.stringify(initial)}`);
+  if (!initial.togglesRemoved || !initial.badgeRemoved || !initial.styleSelect) throw new Error(`composer cleanup failed: ${JSON.stringify(initial)}`);
 
   await page.click('#btnOpenSidebar');
   if (!(await page.locator('#mainSidebar').evaluate(el => el.classList.contains('drawer-open')))) throw new Error('mobile drawer did not open');
-  await page.click('#sidebarBackdrop');
+  // The backdrop center is covered by the sidebar itself; users tap the
+  // exposed area to the right of the 280px drawer.
+  await page.click('#sidebarBackdrop', { position: { x: 340, y: 400 } });
   if (await page.locator('#sidebarBackdrop').isVisible()) throw new Error('drawer backdrop did not close');
 
   await page.click('#btnOpenSidebar');
@@ -90,8 +102,27 @@ try {
   const theme = await page.evaluate(() => ({ className: document.body.className, stored: localStorage.getItem('sakana_theme') }));
   if (!theme.className.includes('theme-light') || theme.stored !== 'light') throw new Error(`theme persistence failed: ${JSON.stringify(theme)}`);
 
+  // Tab pane survives a reload via the URL hash.
   await page.click('#btnOpenSidebar');
   await page.click('[data-tab="chat"]');
+  const hash = await page.evaluate(() => location.hash);
+  if (hash !== '#chat') throw new Error(`tab hash not synced: ${hash}`);
+
+  // Chat drawer on narrow screens keeps the sidebar reachable.
+  await page.click('#btnOpenChatDrawer');
+  if (!(await page.locator('#chatSidebar').evaluate(el => el.classList.contains('chat-drawer-open')))) throw new Error('chat drawer did not open');
+
+  // Custom presets persist in localStorage with an 8-item cap. The save
+  // button lives inside the chat sidebar drawer.
+  await page.fill('#chatInput', '帮我写一个爬虫');
+  await page.click('#btnSavePreset');
+  await page.click('#btnSavePreset');
+  const customPresets = await page.evaluate(() => JSON.parse(localStorage.getItem('sakana_custom_presets') || '[]'));
+  if (customPresets.length !== 2) throw new Error(`custom presets not saved: ${customPresets.length}`);
+  await page.click('#chatDrawerBackdrop', { position: { x: 340, y: 400 } });
+  if (await page.locator('#chatSidebar').evaluate(el => el.classList.contains('chat-drawer-open'))) throw new Error('chat drawer did not close');
+
+  // Attachment retry lifecycle: fail → one-shot retry buffer → later turns clean.
   await page.setInputFiles('#fileUploadInput', {
     name: 'chapter.txt',
     mimeType: 'text/plain',
@@ -118,15 +149,20 @@ try {
   await page.waitForFunction(() => document.querySelector('#chatMessages')?.textContent.includes('retry ok'), null, { timeout: 10_000 });
   if (chatRequests !== 2 || !JSON.stringify(requestBodies[1]).includes('data:text/plain;base64,')) throw new Error('retry request did not carry its one-shot attachment');
 
+  // Retry and new turns route style through the body, not removed toggles.
+  if (requestBodies[1].web_search !== undefined || requestBodies[1].enable_thinking !== undefined) throw new Error('client still sends routing toggles');
+
   await page.fill('#chatInput', '开始下一回');
+  await page.selectOption('#chatStyleSelect', 'osaka');
   await page.click('#btnSendChat');
   await page.waitForFunction(() => document.querySelector('#chatMessages')?.textContent.includes('new turn ok'), null, { timeout: 10_000 });
+  if (requestBodies[2].style !== 'osaka') throw new Error(`style parameter missing: ${JSON.stringify(requestBodies[2]).slice(0, 120)}`);
   const thirdPayload = JSON.stringify(requestBodies[2]);
   if (chatRequests !== 3 || thirdPayload.includes('data:text/plain;base64,') || thirdPayload.includes('chapter attachment')) throw new Error('later turn resent released attachment');
 
   await page.click('#btnOpenSidebar');
   await page.click('[data-tab="models"]');
-  if (await page.locator('#modelMatrixGrid .model-card').count() !== 2) throw new Error('model matrix includes non-standard models');
+  if (await page.locator('#modelMatrixGrid .model-card').count() !== 8) throw new Error('model matrix does not show the 8 standard models');
 
   const chat = await page.evaluate(() => {
     const sessions = Array.from({ length: 25 }, (_, i) => ({ id: `s${i}`, title: `session ${i}`, messages: Array.from({ length: 20 }, () => ({ role: 'user', content: 'x'.repeat(5000), files: [{ name: 'x.png', type: 'image/png', dataUrl: 'data:image/png;base64,' + 'A'.repeat(2000) }] })) }));
@@ -150,7 +186,7 @@ try {
   if (!auditText.includes('method') || auditText.includes('reqBody') || auditText.includes('resBody')) throw new Error(`audit detail is not metadata-only: ${auditText}`);
 
   if (errors.length) throw new Error(errors.join('\n'));
-  console.log('UI smoke passed:', JSON.stringify({ initial, theme, afterFailure, chatRequests, bounded }));
+  console.log('UI smoke passed:', JSON.stringify({ initial, theme, afterFailure, chatRequests, customPresets: customPresets.length, bounded }));
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

@@ -29,7 +29,7 @@ async function streamChat(body) {
 }
 
 console.log('=== A. 流式 + 思考链 ===');
-let r = await streamChat({ model: 'sakana-namazu', stream: true, thinking: true, messages: [{ role: 'user', content: '9.9 和 9.11 哪个大?只回答结果' }] });
+let r = await streamChat({ model: 'sakana', stream: true, thinking: true, messages: [{ role: 'user', content: '9.9 和 9.11 哪个大?只回答结果' }] });
 if (r.error) console.log('ERR', r.error);
 else {
   console.log('chunks:', r.chunks, 'finish:', r.finish);
@@ -38,7 +38,7 @@ else {
 }
 
 console.log('=== B. 流式 + Web Search ===');
-r = await streamChat({ model: 'sakana-namazu', stream: true, web_search: true, messages: [{ role: 'user', content: '今天东京天气如何?用中文简短回答' }] });
+r = await streamChat({ model: 'sakana', stream: true, web_search: true, messages: [{ role: 'user', content: '今天东京天气如何?用中文简短回答' }] });
 if (r.error) console.log('ERR', r.error);
 else {
   console.log('chunks:', r.chunks, 'finish:', r.finish);

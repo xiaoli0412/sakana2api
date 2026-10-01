@@ -3,7 +3,7 @@ console.log('=== TEST 2: streaming, thinking, web search ===');
 const resp = await fetch(BASE + '/v1/chat/completions', {
   method: 'POST', headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
-    model: 'sakana-namazu',
+    model: 'sakana',
     stream: true,
     thinking: true,
     web_search: true,

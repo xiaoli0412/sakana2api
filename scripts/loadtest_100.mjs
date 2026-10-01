@@ -2,9 +2,12 @@
 // Usage: node scripts/loadtest_100.mjs <base_url> <api_key> [concurrency] [nonStreamRatio]
 // Fires N concurrent REAL chat/completions requests (stream + non-stream mix),
 // then reports per-request outcome, latency distribution, server errors.
-const base = process.argv[2] || process.env.BASE_URL || 'http://127.0.0.1:8799';
-const key = process.argv[3] || process.env.SAKANA_TEST_KEY || '';
-const CONCURRENCY = parseInt(process.argv[4] || process.env.CONCURRENCY || '100', 10);
+const base = String(process.env.SAKANA_TEST_BASE || '').replace(/\/$/, '');
+const key = String(process.env.SAKANA_TEST_KEY || '');
+if (!base || !key || process.env.BENCHMARK_CONFIRM !== '1') {
+  throw new Error('Set SAKANA_TEST_BASE, SAKANA_TEST_KEY, and BENCHMARK_CONFIRM=1 for authorized load tests');
+}
+const CONCURRENCY = Math.min(100, Math.max(1, parseInt(process.env.CONCURRENCY || '10', 10)));
 const NONSTREAM_RATIO = parseFloat(process.argv[5] || process.env.NONSTREAM_RATIO || '0.3');
 
 const t0 = Date.now();
@@ -13,7 +16,7 @@ const results = [];
 async function oneRequest(i) {
   const isStream = Math.random() >= NONSTREAM_RATIO;
   const body = {
-    model: 'sakana-namazu',
+    model: 'sakana',
     messages: [{ role: 'user', content: `并发压测请求 #${i}: 请用一句话介绍你自己,不要超过20个字。` }],
     stream: isStream,
     enable_thinking: false,

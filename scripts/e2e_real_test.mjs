@@ -38,7 +38,7 @@ async function startServer() {
   console.log(`[test] Launching server.js on port ${PORT}...`);
   serverProcess = spawn('node', ['server.js'], {
     cwd: path.resolve('.'),
-    env: { ...process.env, PORT: String(PORT), AUTO_SESSION: 'false', CACHE_ENABLED: 'true' },
+    env: { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', API_KEY: 'local-e2e-key', AUTO_SESSION: 'false', CACHE_ENABLED: 'true' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -84,8 +84,8 @@ async function runTests() {
 
       const m = await request('/v1/models');
       check('GET /v1/models returns 200', m.status === 200);
-      check('GET /v1/models contains models array (12 models)', Array.isArray(m.json?.data) && m.json?.data.length === 12);
-      check('models include sakana-namazu and sakana-fugu', m.json?.data.some(x => x.id === 'sakana-namazu') && m.json?.data.some(x => x.id === 'sakana-fugu'));
+      check('GET /v1/models contains 8 public models', Array.isArray(m.json?.data) && m.json?.data.length === 8);
+      check('models include current code/writer profiles', m.json?.data.some(x => x.id === 'sakana-code') && m.json?.data.some(x => x.id === 'sakana-writer'));
 
       const s = await request('/api/stats');
       check('GET /api/stats returns 200', s.status === 200 && typeof s.json?.requests?.total === 'number');
@@ -100,9 +100,9 @@ async function runTests() {
       const pngB64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
       const openaiImg = await request('/v1/chat/completions', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', authorization: 'Bearer local-e2e-key' },
         body: JSON.stringify({
-          model: 'sakana-namazu',
+          model: 'sakana',
           stream: false,
           messages: [
             {
@@ -120,9 +120,9 @@ async function runTests() {
       // B. Anthropic Claude format
       const claudeImg = await request('/v1/chat/completions', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', authorization: 'Bearer local-e2e-key' },
         body: JSON.stringify({
-          model: 'sakana-namazu',
+          model: 'sakana',
           stream: false,
           messages: [
             {
@@ -140,9 +140,9 @@ async function runTests() {
       // C. Google Gemini format
       const geminiImg = await request('/v1/chat/completions', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', authorization: 'Bearer local-e2e-key' },
         body: JSON.stringify({
-          model: 'sakana-namazu',
+          model: 'sakana',
           stream: false,
           messages: [
             {
@@ -161,9 +161,9 @@ async function runTests() {
       const docData = Buffer.from('机密代码: SAKANA-2026').toString('base64');
       const fileReq = await request('/v1/chat/completions', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', authorization: 'Bearer local-e2e-key' },
         body: JSON.stringify({
-          model: 'sakana-namazu',
+          model: 'sakana',
           stream: false,
           messages: [
             {

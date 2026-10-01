@@ -1,9 +1,12 @@
 // Upload stability stress — multiple rounds of image/file uploads against a
 // live deployment to surface intermittent failures (user-reported flakiness).
 // Usage: node scripts/upload_stress.mjs <base> <key> [rounds]
-const BASE = process.argv[2] || process.env.BASE_URL || 'http://127.0.0.1:8799';
-const key = process.argv[3] || process.env.SAKANA_TEST_KEY || '';
-const ROUNDS = parseInt(process.argv[4] || '3', 10);
+const BASE = String(process.env.SAKANA_TEST_BASE || '').replace(/\/$/, '');
+const key = String(process.env.SAKANA_TEST_KEY || '');
+if (!BASE || !key || process.env.BENCHMARK_CONFIRM !== '1') {
+  throw new Error('Set SAKANA_TEST_BASE, SAKANA_TEST_KEY, and BENCHMARK_CONFIRM=1 for authorized upload stress tests');
+}
+const ROUNDS = Math.min(3, Math.max(1, parseInt(process.env.BENCHMARK_ROUNDS || '1', 10)));
 
 let fail = 0;
 function ok(name, cond, extra = '') {
@@ -45,7 +48,7 @@ for (let round = 1; round <= ROUNDS; round++) {
 
   // 1. image (multimodal base64)
   {
-    const r = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: [
+    const r = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: [
       { type: 'text', text: '图片主色是什么?一个字回答。' },
       { type: 'image_url', image_url: { url: PNG } },
     ] }] });
@@ -56,7 +59,7 @@ for (let round = 1; round <= ROUNDS; round++) {
 
   // 2. jpg
   {
-    const r = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: [
+    const r = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: [
       { type: 'text', text: '图片主色是什么?一个字回答。' },
       { type: 'image_url', image_url: { url: JPG } },
     ] }] });
@@ -67,7 +70,7 @@ for (let round = 1; round <= ROUNDS; round++) {
 
   // 3. text file
   {
-    const r = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: [
+    const r = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: [
       { type: 'text', text: '文档里的关键数值是多少?只给数字。' },
       { type: 'file', name: 'data.txt', mime: 'text/plain', file_url: TXT },
     ] }] });
@@ -78,7 +81,7 @@ for (let round = 1; round <= ROUNDS; round++) {
 
   // 4. markdown
   {
-    const r = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: [
+    const r = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: [
       { type: 'text', text: '文档里的秘密编号是多少?只给数字。' },
       { type: 'file', name: 'doc.md', mime: 'text/markdown', file_url: MD },
     ] }] });
@@ -89,7 +92,7 @@ for (let round = 1; round <= ROUNDS; round++) {
 
   // 5. pdf (sandbox upload path)
   {
-    const r = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: [
+    const r = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: [
       { type: 'text', text: '回答“PDF OK”即可。' },
       { type: 'file', name: 'doc.pdf', mime: 'application/pdf', file_url: PDF },
     ] }] });
@@ -100,7 +103,7 @@ for (let round = 1; round <= ROUNDS; round++) {
 
   // 6. image + stream
   {
-    const r = await chat({ model: 'sakana-namazu', stream: true, messages: [{ role: 'user', content: [
+    const r = await chat({ model: 'sakana', stream: true, messages: [{ role: 'user', content: [
       { type: 'text', text: '图片主色是什么?一个字回答。' },
       { type: 'image_url', image_url: { url: PNG } },
     ] }] });
@@ -111,7 +114,7 @@ for (let round = 1; round <= ROUNDS; round++) {
       const resp = await fetch(BASE + '/v1/chat/completions', {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...(key ? { authorization: 'Bearer ' + key } : {}) },
-        body: JSON.stringify({ model: 'sakana-namazu', stream: true, messages: [{ role: 'user', content: [
+        body: JSON.stringify({ model: 'sakana', stream: true, messages: [{ role: 'user', content: [
           { type: 'text', text: '图片主色是什么?一个字回答。' },
           { type: 'image_url', image_url: { url: PNG } },
         ] }] }),

@@ -24,7 +24,7 @@ async function chat(body, timeout = 150000) {
 
 console.log('== A. image upload (multimodal) ==');
 {
-  const r = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: [
+  const r = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: [
     { type: 'text', text: '这张图片是什么颜色?简短回答。' },
     { type: 'image_url', image_url: { url: dataUrl } },
   ] }] });
@@ -37,7 +37,7 @@ console.log('== A. image upload (multimodal) ==');
 console.log('== B. text file upload (extracted into prompt) ==');
 {
   const fileData = 'data:text/plain;base64,' + Buffer.from('机密数值: 8848 米').toString('base64');
-  const r = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: [
+  const r = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: [
     { type: 'text', text: '文件里的机密数值是多少?直接给出数字。' },
     { type: 'file', name: 'secret.txt', mime: 'text/plain', file_url: fileData },
   ] }] });
@@ -49,7 +49,7 @@ console.log('== B. text file upload (extracted into prompt) ==');
 console.log('== C. markdown code file ==');
 {
   const md = Buffer.from('# Numbers\nThe answer is 777.').toString('base64');
-  const r = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: [
+  const r = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: [
     { type: 'text', text: '这个文档里的答案是什么?' },
     { type: 'file', name: 'doc.md', mime: 'text/markdown', file_url: 'data:text/markdown;base64,' + md },
   ] }] });

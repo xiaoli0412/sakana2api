@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
-const { MODELS, openaiRequestToSakana, normalizedMessagesToPrompt, assertStandardModel, NdjsonTranslator, sse, clean, stripChips, extractFileContent } = require('./lib/translate');
+const { MODELS, openaiRequestToSakana, normalizedMessagesToPrompt, assertStandardModel, NdjsonTranslator, sse, clean, stripChips, extractFileContent, buildSearchChainPrompt, renderChainSources, mergeCitations } = require('./lib/translate');
 const { anthropicToChat, chatToAnthropicNonStream, AnthropicStreamer } = require('./lib/anthropic');
 const { SakanaUpstream, UpstreamError, closeGlobalDispatcher } = require('./lib/upstream');
 const { getSession, loadSession, setReloadHandler, SESSION_FILE } = require('./lib/session');
@@ -20,6 +20,7 @@ const { buildNormalizedSakanaRequest } = require('./lib/request-assembly');
 const { makeContextSnapshot, decideContext } = require('./lib/context-policy');
 const { concurrencyManager } = require('./lib/concurrency');
 const { abortCode, abortError: makeAbortError } = require('./lib/abort');
+const optical = require('./lib/optical-context');
 const { parsePngCard, normalizeCard, saveCard, loadCard, listCards, buildCardSystemText } = require('./lib/character-card');
 const { buildRpSystem, resolveRpPreset, resolveRpNsfw, resolveRpLength } = require('./lib/rp-preset');
 const {
@@ -43,6 +44,15 @@ const AUTO_SESSION = process.env.AUTO_SESSION !== 'false';
 // cache is an optimization, not part of conversation correctness.
 const CACHE_ENABLED = process.env.CACHE_ENABLED === 'true';
 const CONTEXT_COMPACT_THRESHOLD_BYTES = parseInt(process.env.CONTEXT_COMPACT_THRESHOLD_BYTES || '0', 10);
+// writer profile gets an automatic upstream-side conversation compaction
+// threshold when the global one is unset — long novels keep the tree healthy.
+// Set WRITER_COMPACT_THRESHOLD_BYTES=0 to disable it explicitly.
+const WRITER_COMPACT_THRESHOLD_BYTES = parseInt(process.env.WRITER_COMPACT_THRESHOLD_BYTES || String(64 * 1024), 10);
+// Optical second-stage compression (DeepSeek-OCR style): for writer requests
+// whose packaged document exceeds this many bytes, the older portion renders
+// into columnar page images; the recent tail stays as the txt attachment.
+// OPTICAL_CONTEXT=0 disables the stage entirely.
+const OPTICAL_CONTEXT_THRESHOLD = Math.max(1, parseInt(process.env.OPTICAL_CONTEXT_THRESHOLD || String(200 * 1000), 10));
 const COMPACTED_TTL_MS = Math.max(0, parseInt(process.env.COMPACTED_CONVERSATION_TTL_MS || String(24 * 60 * 60 * 1000), 10));
 const COMPACTED_MAX = Math.max(0, parseInt(process.env.COMPACTED_CONVERSATION_MAX || '10000', 10));
 const contextTelemetry = {
@@ -586,6 +596,10 @@ function clearContextForAccountRetry(body, req = null) {
 // is_continue until the model emits its real answer; the proxy must do the
 // same transparently instead of leaking an empty completion to clients.
 const MAX_TOOL_CONTINUE_ROUNDS = parseInt(process.env.MAX_TOOL_CONTINUE_ROUNDS || '2', 10);
+// code profile keeps the chain alive longer: multi-step tool flows (write →
+// run → fix) need more continue rounds than the default native-tool recovery.
+const CODE_TOOL_CONTINUE_ROUNDS = Math.max(1, parseInt(process.env.CODE_TOOL_CONTINUE_ROUNDS || '4', 10));
+const toolRoundsFor = (sakanaReq) => (sakanaReq?.route?.family === 'code' ? CODE_TOOL_CONTINUE_ROUNDS : MAX_TOOL_CONTINUE_ROUNDS);
 
 /**
  * Generator variant of drainUpstreamRound for SSE producers: yields one
@@ -677,6 +691,77 @@ async function continueNativeToolRound(conversationId, sakanaReq, signal) {
   return { ...(await drainUpstreamRound(resp, new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames }), undefined, signal)), leaf };
 }
 
+/**
+ * Smart-routing round 1 for code/writer profiles: a search-only collection
+ * pass on the same conversation. Returns bounded sources for the thinking
+ * round; the caller falls back to single-round on any failure.
+ */
+async function runSearchChainRound(conversationId, sakanaReq, { lastMessageId, signal }) {  const searchReq = {
+    ...sakanaReq,
+    prompt: buildSearchChainPrompt(sakanaReq),
+    files: [],
+    enableThinking: false,
+    webSearchEnabled: true,
+    tools: null,
+    clientToolNames: [],
+    isContinue: false,
+    isRetry: false,
+    route: { ...(sakanaReq.route || {}), chainSearch: false },
+  };
+  const t = new NdjsonTranslator({ declaredTools: [] });
+  const resp = await upstream.streamGenerate(conversationId, searchReq, { lastMessageId, signal });
+  const drained = await drainUpstreamRound(resp, t, undefined, signal);
+  return { citations: t.citations || [], reasoning: drained.reasoning || '', note: renderChainSources(t.citations) };
+}
+
+/**
+ * Optical second-stage compression for writer requests: when the packaged
+ * context document exceeds OPTICAL_CONTEXT_THRESHOLD, render the older 70%
+ * into columnar page images and keep the recent tail as the txt attachment.
+ * Any failure leaves the original single-document pipeline untouched.
+ */
+async function maybeApplyOpticalCompression(sakanaReq, signal) {
+  if (!sakanaReq?.route || sakanaReq.route.family !== 'writer') return;
+  if (process.env.OPTICAL_CONTEXT === '0') return;
+  const docIndex = (sakanaReq.files || []).findIndex((f) => f && f.synthetic && /^context_document\.(txt|json)$/.test(f.name));
+  if (docIndex === -1) return;
+  const doc = sakanaReq.files[docIndex];
+  const fullText = doc.buf.toString('utf8');
+  if (doc.buf.length < OPTICAL_CONTEXT_THRESHOLD) return;
+  const keepChars = Math.min(Math.floor(fullText.length * 0.3), 100_000);
+  const oldPart = fullText.slice(0, fullText.length - keepChars);
+  const recentPart = fullText.slice(fullText.length - keepChars);
+  if (oldPart.length < OPTICAL_CONTEXT_THRESHOLD) return;
+
+  const rendered = await optical.renderTextToPages(oldPart, {
+    density: process.env.OPTICAL_DENSITY || 'medium',
+    maxPages: parseInt(process.env.OPTICAL_MAX_PAGES || '8', 10),
+    signal,
+  });
+  if (!rendered.pages.length) return;
+
+  const pageFiles = rendered.pages.map((page, i) => ({
+    type: 'base64',
+    name: `context_page-${String(i + 1).padStart(2, '0')}.png`,
+    synthetic: true,
+    mime: 'image/png',
+    buf: page.buf,
+  }));
+  const recentFile = {
+    ...doc,
+    name: 'context_document.txt',
+    mime: 'text/plain',
+    buf: Buffer.from(recentPart, 'utf8'),
+  };
+  sakanaReq.files.splice(docIndex, 1, ...pageFiles, recentFile);
+  const lastPage = String(rendered.pages.length).padStart(2, '0');
+  sakanaReq.prompt = sakanaReq.prompt.replace(
+    '... [文档主体内容已挂载至附件 context_document.txt] ...',
+    `[文档较早部分已按阅读顺序渲染为图片 context_page-01..${lastPage},请先读取全部图片页;较近部分保留在附件 context_document.txt]`,
+  );
+  console.log(`[optical] writer document compressed: ${oldPart.length} chars -> ${rendered.pages.length} pages (density=${rendered.density}, truncated=${rendered.truncated})`);
+}
+
 // High-Affinity Conversation Context & Stickiness Manager
 // Backed by lib/context.js (ContextStore, unit-tested). These thin wrappers
 // keep the legacy call shapes AND bind the request-scoped account via
@@ -724,8 +809,12 @@ async function refreshContextLeaf(conversationId, fallback = '', signal) {
   }
 }
 
-async function maybeCompactConversation(conversationId, leafMessageId, normalized, signal) {
-  if (!conversationId || !leafMessageId || !Number.isFinite(CONTEXT_COMPACT_THRESHOLD_BYTES) || CONTEXT_COMPACT_THRESHOLD_BYTES <= 0) return false;
+async function maybeCompactConversation(conversationId, leafMessageId, normalized, signal, body = null) {
+  const writerProfile = body?.__writerProfile === true;
+  const compactThreshold = CONTEXT_COMPACT_THRESHOLD_BYTES > 0
+    ? CONTEXT_COMPACT_THRESHOLD_BYTES
+    : (writerProfile ? WRITER_COMPACT_THRESHOLD_BYTES : 0);
+  if (!conversationId || !leafMessageId || !Number.isFinite(compactThreshold) || compactThreshold <= 0) return false;
   const now = Date.now();
   for (const [id, ts] of compactedConversations) {
     if (COMPACTED_TTL_MS <= 0 || now - ts >= COMPACTED_TTL_MS) compactedConversations.delete(id);
@@ -733,7 +822,7 @@ async function maybeCompactConversation(conversationId, leafMessageId, normalize
   const compactedAt = compactedConversations.get(conversationId);
   if (compactedAt && (COMPACTED_TTL_MS <= 0 || now - compactedAt < COMPACTED_TTL_MS)) return false;
   const bytes = Number(normalized?.measurements?.totalBytes || normalized?.textBytes || 0);
-  if (bytes < CONTEXT_COMPACT_THRESHOLD_BYTES) return false;
+  if (bytes < compactThreshold) return false;
   try {
     await upstream.compactConversation(conversationId, leafMessageId, signal);
     compactedConversations.set(conversationId, now);
@@ -759,7 +848,7 @@ async function finalizeContext(body, normalized, conversationId, fallbackLeaf, r
   if (signal?.aborted) throw makeAbortError(signal.reason);
   saveContext(req, body, conversationId, finalLeaf, null, snapshot);
   if (signal?.aborted) throw makeAbortError(signal.reason);
-  await maybeCompactConversation(conversationId, finalLeaf, normalized, signal);
+  await maybeCompactConversation(conversationId, finalLeaf, normalized, signal, body);
   return finalLeaf;
 }
 
@@ -874,6 +963,11 @@ async function handleGeminiGenerate(req, res, route, url) {
 async function handleChatBody(req, res, body, start = Date.now()) {
   let normalized;
   let contextSnapshot;
+  // Long-context packaging format: body field wins, x-context-format header
+  // is the wire-level override for clients that cannot extend the body.
+  if (body && body.context_format === undefined && req?.headers?.['x-context-format']) {
+    body.context_format = String(req.headers['x-context-format']);
+  }
   try {
     normalized = await normalizeRequestBody(body, { signal: req.__signal });
     contextSnapshot = makeContextSnapshot(normalized);
@@ -928,7 +1022,7 @@ async function handleChatBody(req, res, body, start = Date.now()) {
     Object.defineProperty(body, '__normalizedRequest', { value: normalized, enumerable: false, configurable: true, writable: true });
   }
 
-  const model = body.model || 'sakana-namazu';
+  const model = body.model || 'sakana';
   let acquired = false;
   try {
     assertStandardModel(model);
@@ -1031,7 +1125,7 @@ async function handleChatBody(req, res, body, start = Date.now()) {
       const status = clientErrorStatus(e, 500);
       const safe = sanitizeError(e, status);
       if (body.__statsStarted) {
-        stats.finish({ stream: body.stream !== false, ok: false, error: safe.code, model: body.model || 'sakana-namazu', keyId: req.keyId });
+        stats.finish({ stream: body.stream !== false, ok: false, error: safe.code, model: body.model || 'sakana', keyId: req.keyId });
       }
       auditEntry(req, body, status, null, e, Date.now() - start);
       if (isRpModelError(e)) {
@@ -1058,7 +1152,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     sakanaReq.contextSnapshot = contextSnapshot;
     injectRpRules(sakanaReq, req, body);
     const streaming = body.stream !== false;
-    const modelName = body.model || 'sakana-namazu';
+    const modelName = body.model || 'sakana';
     stats.begin(modelName);
     Object.defineProperty(body, '__statsStarted', { value: true, enumerable: false, configurable: true, writable: true });
     let promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
@@ -1071,7 +1165,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       const textParts = [];
       const remaining = [];
       for (const f of sakanaReq.files) {
-        if (f.name === 'context_document.txt') {
+        if (f.synthetic && /^context_document\.(txt|json)$/.test(f.name)) {
           remaining.push(f);
           continue;
         }
@@ -1128,6 +1222,34 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       lastMessageId = await upstream.getLastMessageId(conversationId, signal);
     }
 
+    // Smart routing round 1 (code/writer profiles): search-only collection
+    // pass, then feed the sources into the thinking round. Runs before the
+    // main stream so lease/retry semantics on main-round failures are kept.
+    let chainCitations = [];
+    let chainReasoning = '';
+    if (sakanaReq.route?.chainSearch && !sakanaReq.isToolTurn && !sakanaReq.isContinue) {
+      try {
+        const chain = await runSearchChainRound(conversationId, sakanaReq, { lastMessageId, signal });
+        if (chain.note) {
+          sakanaReq.prompt = chain.note + '\n\n' + sakanaReq.prompt;
+          chainCitations = chain.citations;
+          if (chain.citations.length) {
+            chainReasoning = `🔍 联网检索完成,找到 ${chain.citations.length} 个来源。\n${chain.reasoning || ''}`;
+          }
+          try { lastMessageId = await upstream.getLastMessageId(conversationId, signal); } catch {}
+        }
+      } catch (e) {
+        console.log(`[search-chain] round-1 failed, falling back to single round: ${stableErrorCode(e, 500)}`);
+      }
+    }
+
+    // Optical second-stage compression (writer profile, very long docs).
+    try {
+      await maybeApplyOpticalCompression(sakanaReq, signal);
+    } catch (e) {
+      console.log(`[optical] render failed, keeping single-document pipeline: ${stableErrorCode(e, 500)}`);
+    }
+
     const upResp = await upstream.streamGenerate(conversationId, sakanaReq, { lastMessageId, signal });
 
     if (!streaming) {
@@ -1145,7 +1267,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       // frontend sends is_continue until the model emits its answer — do the
       // same here, invisibly, up to MAX_TOOL_CONTINUE_ROUNDS.
       let rounds = 0;
-      while (!text && !t.clientToolRound && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
+      while (!text && !t.clientToolRound && rounds < toolRoundsFor(sakanaReq)) {
         rounds++;
         let cont;
         try { cont = await continueNativeToolRound(conversationId, sakanaReq, signal); }
@@ -1153,6 +1275,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
         text += cont.content;
         reasoning += cont.reasoning;
         toolCalls.push(...cont.toolCalls);
+        cont.t.citations = mergeCitations(t.citations, cont.t.citations);
         t = cont.t;
         lastMessageId = cont.leaf;
       }
@@ -1180,8 +1303,9 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
         choices: [{ index: 0, message: msg, finish_reason: finishReason }],
         usage: { prompt_tokens: Math.round(promptChars / 4), completion_tokens: Math.round(((text || '').length + (reasoning || '').length) / 4), total_tokens: 0 },
       };
-      if (t.citations && t.citations.length) {
-        response.citations = t.citations;
+      const mergedCitations = mergeCitations(chainCitations, t.citations);
+      if (mergedCitations.length) {
+        response.citations = mergedCitations;
       }
       stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: req.keyId });
       const finalLeaf = await finalizeContext(body, normalized, conversationId, lastMessageId, req, contextSnapshot, signal);
@@ -1204,11 +1328,14 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
         if (d && d.content) streamedChars += d.content.length;
         res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
       };
+      if (chainReasoning) {
+        res.write(sse('chat.completion.chunk', { ...base, choices: [{ index: 0, delta: { reasoning_content: chainReasoning }, finish_reason: null }] }));
+      }
       await drainUpstreamRound(upResp, t, onChunk, signal);
       // Native tool round with no text: continue transparently (same as the
       // non-stream path) so stream clients aren't cut off mid-analysis.
       let rounds = 0;
-      while (!t.sentContent && !t.clientToolRound && !streamError && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
+      while (!t.sentContent && !t.clientToolRound && !streamError && rounds < toolRoundsFor(sakanaReq)) {
         rounds++;
         try {
           const contT = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
@@ -1219,6 +1346,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
           await drainUpstreamRound(contResp, contT, onChunk, signal);
           if (!contT.sentContent) { t.nativeToolRound = contT.nativeToolRound; continue; }
           // Text arrived in the continuation round — finish with that translator.
+          contT.citations = mergeCitations(t.citations, contT.citations);
           t = contT;
         } catch (e) {
           streamError = safeErrorDetail(e);
@@ -1232,6 +1360,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
         streamErrCode = 'EMPTY-RESPONSE';
       }
       if (!streamError) {
+        t.citations = mergeCitations(chainCitations, t.citations);
         for (const c of t.finish()) {
           const chunkData = { ...base, choices: c.choices };
           if (c.citations && c.citations.length) chunkData.citations = c.citations;
@@ -1301,7 +1430,7 @@ async function handleLegacyCompletions(req, res) {
     id: 'cmpl-' + randomUUID().replace(/-/g, ''),
     object: 'text_completion',
     created: Math.floor(Date.now() / 1000),
-    model: chatBody.model || 'sakana-namazu',
+    model: chatBody.model || 'sakana',
     choices: [{ index: 0, text: reader.content || '', finish_reason: 'stop' }],
     usage: { prompt_tokens: reader.promptTokens || 0, completion_tokens: reader.completionTokens || 0, total_tokens: (reader.promptTokens || 0) + (reader.completionTokens || 0) },
   });
@@ -1354,7 +1483,7 @@ async function handleResponses(req, res) {
     object: 'response',
     created_at: Math.floor(Date.now() / 1000),
     status: 'completed',
-    model: chatBody.model || 'sakana-namazu',
+    model: chatBody.model || 'sakana',
     output: [{ id: 'msg_' + randomUUID().slice(0, 8), type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text }] }],
     usage: { input_tokens: reader.promptTokens || 0, output_tokens: reader.completionTokens || 0, total_tokens: (reader.promptTokens || 0) + (reader.completionTokens || 0) },
     conversation_id: reader.conversationId || undefined,
@@ -1380,7 +1509,7 @@ async function handleAnthropicMessages(req, res) {
   if (!reader) return;
   if (stream) {
     sseHeaders(res);
-    const streamer = new AnthropicStreamer({ model: chatBody.model || 'sakana-namazu' });
+    const streamer = new AnthropicStreamer({ model: chatBody.model || 'sakana' });
     res.write(`data: ${JSON.stringify(streamer.start())}\n\n`);
     for await (const c of reader) {
       if (c.event === 'chat.completion.chunk') {
@@ -1400,7 +1529,7 @@ async function handleAnthropicMessages(req, res) {
   if (reader.error) return sendJson(res, 502, { error: { message: reader.error, type: 'upstream_error', code: 'EMPTY-RESPONSE' } });
   const finishReason = reader.finishReason || (!reader.content && toolCalls.length ? 'tool_calls' : 'stop');
   return sendJson(res, 200, chatToAnthropicNonStream({
-    model: chatBody.model || 'sakana-namazu',
+    model: chatBody.model || 'sakana',
     usage: { prompt_tokens: reader.promptTokens || 0, completion_tokens: reader.completionTokens || 0 },
     choices: [{
       index: 0,
@@ -1468,7 +1597,7 @@ async function makeChatResponse(chatBody) {
   Object.defineProperty(chatBody, '__forceNewContext', { value: !!chatBody.__forceNewContext || contextDecision.action === 'fork' || contextDecision.action === 'rebuild', enumerable: false, configurable: true, writable: true });
   Object.defineProperty(chatBody, '__ignoreExplicitContext', { value: !!chatBody.__ignoreExplicitContext || contextDecision.action === 'rebuild', enumerable: false, configurable: true, writable: true });
 
-  const model = chatBody.model || 'sakana-namazu';
+  const model = chatBody.model || 'sakana';
   assertStandardModel(model);
   await concurrencyManager.acquire(AUTO_SESSION ? accountPool : null, { signal });
   let slotTransferred = false;
@@ -1570,7 +1699,7 @@ async function makeChatResponseInner(chatBody) {
   sakanaReq.messageFingerprint = effectiveNormalized.fingerprint || normalized.fingerprint;
   sakanaReq.contextSnapshot = contextSnapshot;
   injectRpRules(sakanaReq, request, body);
-  const modelName = body.model || 'sakana-namazu';
+  const modelName = body.model || 'sakana';
   const streaming = body.stream === true ? true : false;
   stats.begin(modelName);
   let promptChars = (sakanaReq.prompt || '').length + (sakanaReq.files || []).length * 200;
@@ -1583,7 +1712,7 @@ async function makeChatResponseInner(chatBody) {
     const textParts = [];
     const remaining = [];
       for (const f of sakanaReq.files) {
-        if (f.name === 'context_document.txt') {
+        if (f.synthetic && /^context_document\.(txt|json)$/.test(f.name)) {
           remaining.push(f);
           continue;
         }
@@ -1637,6 +1766,28 @@ async function makeChatResponseInner(chatBody) {
     lastMessageId = await upstream.getLastMessageId(conversationId, signal);
   }
 
+  // Smart routing round 1 (code/writer profiles) — same as the chat path.
+  let chainCitations = [];
+  if (sakanaReq.route?.chainSearch && !sakanaReq.isToolTurn && !sakanaReq.isContinue) {
+    try {
+      const chain = await runSearchChainRound(conversationId, sakanaReq, { lastMessageId, signal });
+      if (chain.note) {
+        sakanaReq.prompt = chain.note + '\n\n' + sakanaReq.prompt;
+        chainCitations = chain.citations;
+        try { lastMessageId = await upstream.getLastMessageId(conversationId, signal); } catch {}
+      }
+    } catch (e) {
+      console.log(`[search-chain] round-1 failed, falling back to single round: ${stableErrorCode(e, 500)}`);
+    }
+  }
+
+  // Optical second-stage compression (writer profile, very long docs).
+  try {
+    await maybeApplyOpticalCompression(sakanaReq, signal);
+  } catch (e) {
+    console.log(`[optical] render failed, keeping single-document pipeline: ${stableErrorCode(e, 500)}`);
+  }
+
   const upResp = await upstream.streamGenerate(conversationId, sakanaReq, { lastMessageId, signal });
   let t = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
 
@@ -1650,7 +1801,7 @@ async function makeChatResponseInner(chatBody) {
         for await (const ev of drainRoundToSSE(upResp, t, base, signal)) yield ev;
         // Native tool round with no text: continue transparently.
         let rounds = 0;
-        while (!t.sentContent && !t.clientToolRound && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
+        while (!t.sentContent && !t.clientToolRound && rounds < toolRoundsFor(sakanaReq)) {
           rounds++;
           const contT = new NdjsonTranslator({ declaredTools: sakanaReq.clientToolNames });
           const leaf = await upstream.getLastMessageId(conversationId, signal);
@@ -1659,6 +1810,7 @@ async function makeChatResponseInner(chatBody) {
           const contResp = await upstream.streamGenerate(conversationId, contReq, { lastMessageId: leaf, signal });
           for await (const ev of drainRoundToSSE(contResp, contT, base, signal)) yield ev;
           if (!contT.sentContent) { t.nativeToolRound = contT.nativeToolRound; continue; }
+          contT.citations = mergeCitations(t.citations, contT.citations);
           t = contT;
         }
         if (!t.sentContent) {
@@ -1666,6 +1818,7 @@ async function makeChatResponseInner(chatBody) {
           const fb = { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'error' }], error: { message: 'empty upstream response', code: 'EMPTY-RESPONSE' } };
           yield { event: 'chat.completion.chunk', data: fb };
         }
+        t.citations = mergeCitations(chainCitations, t.citations);
         for (const c of t.finish()) {
           const data = { ...base, choices: c.choices };
           if (c.usage) data.usage = c.usage;
@@ -1692,7 +1845,7 @@ async function makeChatResponseInner(chatBody) {
   let finalT = first.t;
   // Transparent native-tool continuation (same rule as chat path).
   let rounds = 0;
-  while (!text && !finalT.clientToolRound && rounds < MAX_TOOL_CONTINUE_ROUNDS) {
+  while (!text && !finalT.clientToolRound && rounds < toolRoundsFor(sakanaReq)) {
     rounds++;
     try {
       const cont = await continueNativeToolRound(conversationId, sakanaReq, signal);

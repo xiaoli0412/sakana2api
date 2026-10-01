@@ -1,7 +1,8 @@
 // Local E2E against http://127.0.0.1:8799 — verifies the v0.6 requirements
 // that don't need a browser: tool round-trip, conversation continuity,
 // streaming, empty-response error surfaced, cache, long text.
-const BASE = 'http://127.0.0.1:8799';
+const BASE = process.env.SAKANA_TEST_BASE || 'http://127.0.0.1:8799';
+const AUTH = process.env.SAKANA_TEST_KEY ? { authorization: `Bearer ${process.env.SAKANA_TEST_KEY}` } : {};
 let fails = 0;
 const ok = (name, cond, extra = '') => {
   if (cond) console.log('  ✓', name);
@@ -11,7 +12,7 @@ const ok = (name, cond, extra = '') => {
 async function chat(body, opts = {}) {
   const t0 = Date.now();
   const resp = await fetch(BASE + '/v1/chat/completions', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', ...AUTH },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(opts.timeout || 120000),
   });
@@ -56,7 +57,7 @@ async function chat(body, opts = {}) {
 
 console.log('== A. streaming default (stream unspecified → SSE) ==');
 {
-  const r = await chat({ model: 'sakana-namazu', messages: [{ role: 'user', content: '只回答:你好' }] });
+  const r = await chat({ model: 'sakana', messages: [{ role: 'user', content: '只回答:你好' }] });
   ok('streaming SSE', r.stream === true && r.content.length > 0, JSON.stringify(r).slice(0, 150));
   ok('finish stop', r.finish === 'stop', String(r.finish));
   ok('has conversation header', !!r.conversationId, String(r.conversationId));
@@ -65,9 +66,9 @@ console.log('== A. streaming default (stream unspecified → SSE) ==');
 
 console.log('== B. conversation continuity (ghost-conversation fix) ==');
 {
-  const r1 = await chat({ model: 'sakana-namazu', messages: [{ role: 'user', content: '我叫测试用户,请记住。' }], stream: false });
+  const r1 = await chat({ model: 'sakana', messages: [{ role: 'user', content: '我叫测试用户,请记住。' }], stream: false });
   ok('round1 ok', !!r1.text);
-  const r2 = await chat({ model: 'sakana-namazu', messages: [
+  const r2 = await chat({ model: 'sakana', messages: [
     { role: 'user', content: '我叫测试用户,请记住。' },
     { role: 'assistant', content: r1.text || '' },
     { role: 'user', content: '我叫什么名字?' },
@@ -80,8 +81,8 @@ console.log('== B. conversation continuity (ghost-conversation fix) ==');
 
 console.log('== C. explicit conversation_id continuation ==');
 {
-  const r1 = await chat({ model: 'sakana-namazu', messages: [{ role: 'user', content: '记住数字 42。' }], stream: false });
-  const r2 = await chat({ model: 'sakana-namazu', conversation_id: r1.conversationId, messages: [{ role: 'user', content: '数字是多少?' }], stream: false });
+  const r1 = await chat({ model: 'sakana', messages: [{ role: 'user', content: '记住数字 42。' }], stream: false });
+  const r2 = await chat({ model: 'sakana', conversation_id: r1.conversationId, messages: [{ role: 'user', content: '数字是多少?' }], stream: false });
   ok('round1 ok', !!r1.text);
   ok('round2 ok', !!r2.text);
   ok('remembered 42', /42/.test(r2.text || ''), (r2.text || '').slice(0, 200));
@@ -89,10 +90,10 @@ console.log('== C. explicit conversation_id continuation ==');
 
 console.log('== D. tool round-trip (external framework) ==');
 {
-  const r1 = await chat({ model: 'sakana-namazu', stream: false, tools: [{ type: 'function', function: { name: 'get_weather', description: '查询天气', parameters: { type: 'object', properties: { city: { type: 'string' } } } } }], messages: [{ role: 'user', content: '北京天气如何?请调用 get_weather(city="北京") 查询' }] });
+  const r1 = await chat({ model: 'sakana', stream: false, tools: [{ type: 'function', function: { name: 'get_weather', description: '查询天气', parameters: { type: 'object', properties: { city: { type: 'string' } } } } }], messages: [{ role: 'user', content: '北京天气如何?请调用 get_weather(city="北京") 查询' }] });
   ok('tool round1 ok', !!r1.text, (r1.text || '').slice(0, 120));
   // framework executes tool itself, returns result as tool message
-  const r2 = await chat({ model: 'sakana-namazu', stream: false, messages: [
+  const r2 = await chat({ model: 'sakana', stream: false, messages: [
     { role: 'user', content: '北京天气如何?请调用 get_weather(city="北京") 查询' },
     { role: 'assistant', content: r1.text || '' },
     { role: 'tool', name: 'get_weather', tool_call_id: 'call_1', content: '{"city":"北京","weather":"晴","temperature":"25°C"}' },
@@ -104,14 +105,14 @@ console.log('== D. tool round-trip (external framework) ==');
 console.log('== E. long input / output ==');
 {
   const longText = '长文本测试。'.repeat(3000); // ~15000 chars
-  const r = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: longText + ' 请问这段文本有多长?' }] }, { timeout: 180000 });
+  const r = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: longText + ' 请问这段文本有多长?' }] }, { timeout: 180000 });
   ok('long input ok', !!r.text, (r.error || '').toString());
   ok('long output not empty', (r.text || '').length > 0);
 }
 
 console.log('== F. cache hit ==');
 {
-  const body = { model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: '缓存测试:输出 CACHE-OK' }] };
+  const body = { model: 'sakana', stream: false, messages: [{ role: 'user', content: '缓存测试:输出 CACHE-OK' }] };
   const r1 = await chat(body);
   const r2 = await chat(body);
   ok('cache round1 ok', !!r1.text);
@@ -123,7 +124,8 @@ console.log('== F. cache hit ==');
 console.log('== G. model matrix ==');
 {
   const m = await (await fetch(BASE + '/v1/models')).json();
-  ok('12 models', m.data && m.data.length === 12, String(m.data && m.data.length));
+  ok('8 public models', m.data && m.data.length === 8, String(m.data && m.data.length));
+  ok('current profiles present', m.data?.some(x => x.id === 'sakana-code') && m.data?.some(x => x.id === 'sakana-writer'));
   ok('hyphen format', m.data.every(x => !x.id.includes(':')), m.data.map(x => x.id).join(','));
 }
 

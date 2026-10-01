@@ -1,6 +1,6 @@
 // Offline test: feed a realistic Sakana NDJSON stream (based on the protocol)
 // into the translator and verify the OpenAI SSE chunks it produces.
-import { openaiRequestToSakana, NdjsonTranslator, sniffMimeType, parseModel, MODELS, RP_MODEL_ERROR_CODE, normalizedMessagesToPrompt } from '../lib/translate.js';
+import { openaiRequestToSakana, NdjsonTranslator, sniffMimeType, parseModel, MODELS, RP_MODEL_ERROR_CODE, normalizedMessagesToPrompt, buildSearchChainPrompt, renderChainSources, mergeCitations } from '../lib/translate.js';
 import { AccountPool } from '../lib/account-pool.js';
 import { ConcurrencyManager } from '../lib/concurrency.js';
 
@@ -23,9 +23,19 @@ console.log('== 1. OpenAI request -> Sakana bootstrap ==');
   check('default mode: thinking on, search off', r.webSearchEnabled === false && r.enableThinking === true);
 }
 
-console.log('== 1b. hyphen model matrix parsing ==');
+console.log('== 1b. hyphen model matrix parsing (8 public + legacy aliases) ==');
 {
   const cases = [
+    // 8 public profiles
+    ['sakana', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-mini', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-code', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-code-mini', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-writer', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-writer-mini', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-polite', { m: 'sakana-namazu', tone: 'jp-vibes', search: false, think: true, rp: false }],
+    ['sakana-osaka', { m: 'sakana-namazu', tone: 'osaka', search: false, think: true, rp: false }],
+    // legacy v0.14 aliases resolve to the closest profile
     ['sakana-namazu', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
     ['sakana-namazu-polite', { m: 'sakana-namazu', tone: 'jp-vibes', search: false, think: true, rp: false }],
     ['sakana-namazu-search', { m: 'sakana-namazu', tone: 'default', search: true, think: true, rp: false }],
@@ -34,6 +44,9 @@ console.log('== 1b. hyphen model matrix parsing ==');
     ['sakana-fugu', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
     ['sakana-fugu-polite-search', { m: 'fugu', tone: 'jp-vibes', search: true, think: true, rp: false }],
     ['sakana-fugu-osaka', { m: 'fugu', tone: 'osaka', search: false, think: true, rp: false }],
+    // code/writer families keep legacy suffix composition working
+    ['sakana-code-mini-search', { m: 'fugu', tone: 'default', search: true, think: true, rp: false }],
+    ['sakana-writer-mini', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
   ];
   for (const [model, want] of cases) {
     const r = parseModel(model);
@@ -41,7 +54,10 @@ console.log('== 1b. hyphen model matrix parsing ==');
     check(`parse ${model}`, JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got));
   }
   check('RP models removed from /v1/models', !MODELS.some((m) => m.id.includes('-rp')));
-  check('total models = 12', MODELS.length === 12, String(MODELS.length));
+  check('total models = 8', MODELS.length === 8, String(MODELS.length));
+  check('code profile flagged on sakana-code', parseModel('sakana-code').profile.family === 'code');
+  check('writer profile flagged on sakana-writer', parseModel('sakana-writer').profile.family === 'writer');
+  check('legacy namazu maps to standard profile', parseModel('sakana-namazu').profile.id === 'sakana');
   for (const model of ['sakana-namazu-rp', 'sakana-fugu-rp', 'sakana-namazu:rp', 'sakana-namazu-rp2', 'sakana-namazurp', 'sakana-fugu-rp2', 'sakana-namazu:rp2', 'models/sakana-namazu-rp2']) {
     try {
       parseModel(model);
@@ -278,6 +294,38 @@ console.log('== 13b. INPUT-MODE-001 硬约束:思考与搜索互斥,搜索优先
   check('think model + explicit search off -> thinking on', thinkModelSearchOff.enableThinking === true && thinkModelSearchOff.webSearchEnabled === false);
 }
 
+console.log('== 13b-2. smart routing: code/writer chainSearch ==');
+{
+  const code = openaiRequestToSakana({ model: 'sakana-code', messages: [{ role: 'user', content: 'fix bug' }] });
+  check('code model defaults to chainSearch', code.route.chainSearch === true && code.enableThinking === true && code.webSearchEnabled === false);
+
+  const writer = openaiRequestToSakana({ model: 'sakana-writer-mini', messages: [{ role: 'user', content: 'novel' }] });
+  check('writer model defaults to chainSearch', writer.route.chainSearch === true);
+
+  const standard = openaiRequestToSakana({ model: 'sakana', messages: [{ role: 'user', content: 'hi' }] });
+  check('standard model stays single round', standard.route.chainSearch === false && standard.route.family === 'standard');
+
+  const codeExplicitSearch = openaiRequestToSakana({ model: 'sakana-code', web_search: true, messages: [{ role: 'user', content: 'fix bug' }] });
+  check('code model explicit search falls back to single round', codeExplicitSearch.route.chainSearch === false && codeExplicitSearch.webSearchEnabled === true && codeExplicitSearch.enableThinking === false);
+
+  const codeNoThink = openaiRequestToSakana({ model: 'sakana-code', enable_thinking: false, messages: [{ role: 'user', content: 'fix bug' }] });
+  check('code model with thinking off skips chain', codeNoThink.route.chainSearch === false);
+
+  const toolTurn = openaiRequestToSakana({ model: 'sakana-code', messages: [{ role: 'user', content: 'q' }, { role: 'tool', tool_call_id: 't1', content: 'res' }] });
+  check('tool turn skips search chain', toolTurn.route.chainSearch === true && toolTurn.isToolTurn === true);
+}
+
+console.log('== 13b-3. search-chain helpers ==');
+{
+  const chainPrompt = buildSearchChainPrompt({ prompt: 'X'.repeat(5000) + '关键问题?' });
+  check('chain prompt keeps tail question', chainPrompt.includes('关键问题?') && chainPrompt.length < 5000);
+  const note = renderChainSources([{ title: 'A', url: 'https://a', snippet: 's' }, { url: 'https://b' }, null]);
+  check('chain sources render bounded list', note.includes('https://a') && note.includes('https://b') && note.includes('检索资料'));
+  check('chain sources drop empty', renderChainSources([null, {}, { url: '' }]) === '');
+  const merged = mergeCitations([{ url: 'u1', title: 'x' }, { url: 'u2' }], [{ url: 'u1' }, { url: 'u3', title: 'z' }], null);
+  check('mergeCitations dedupes by url keeping first', merged.length === 3 && merged[0].title === 'x' && merged[2].title === 'z');
+}
+
 console.log('== 13c. system prompt and RP injection ==');
 {
   const r = openaiRequestToSakana({ model: 'sakana-namazu', messages: [
@@ -299,6 +347,13 @@ console.log('== 13c. system prompt and RP injection ==');
   } catch (error) {
     check('RP model request rejects before prompt build', error.code === RP_MODEL_ERROR_CODE);
   }
+
+  const codeProfile = openaiRequestToSakana({ model: 'sakana-code', messages: [{ role: 'system', content: 'SYS-X' }, { role: 'user', content: '修复这个 bug' }] });
+  check('code protocol rides above user system', codeProfile.prompt.startsWith('[Code 模式协议') && codeProfile.prompt.includes('SYS-X'), codeProfile.prompt.slice(0, 60));
+  const writerProfile = openaiRequestToSakana({ model: 'sakana-writer', messages: [{ role: 'user', content: '继续写' }] });
+  check('writer protocol injected', writerProfile.prompt.startsWith('[写作模式协议'), writerProfile.prompt.slice(0, 40));
+  const plainProfile = openaiRequestToSakana({ model: 'sakana', messages: [{ role: 'user', content: 'hi' }] });
+  check('standard profile has no extra protocol', !plainProfile.prompt.includes('模式协议'), plainProfile.prompt.slice(0, 40));
 }
 
 console.log('== 14. Least-InFlight load balancing & account pool ==');

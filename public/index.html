@@ -815,7 +815,26 @@
     gap: 10px;
     flex-shrink: 0;
   }
-  @media (max-width: 768px) { .chat-sidebar { display: none; } }
+  /* Narrow screens: the chat sidebar becomes an overlay drawer instead of
+     disappearing — history/presets/character cards stay reachable. */
+  @media (max-width: 768px) {
+    .chat-sidebar {
+      position: fixed;
+      left: 0; top: 0; bottom: 0;
+      z-index: 70;
+      transform: translateX(-105%);
+      transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 4px 0 24px rgba(0, 0, 0, 0.3);
+    }
+    .chat-sidebar.chat-drawer-open { transform: translateX(0); }
+    #btnOpenChatDrawer { display: inline-flex !important; }
+  }
+  #chatDrawerBackdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 65;
+    background: rgba(0, 0, 0, 0.45);
+  }
 
   .chat-main {
     flex: 1;
@@ -1581,7 +1600,7 @@
       <button class="mobile-menu-btn" id="btnOpenSidebar" type="button" aria-label="打开导航" title="打开导航">☰</button>
       <div class="topbar-title">
         <span id="pageHeaderTitle">仪表盘</span>
-        <span class="badge-tag" id="serverEnvTag">Sakana v0.14.0</span>
+        <span class="badge-tag" id="serverEnvTag">Sakana v0.15.0</span>
       </div>
       <div class="topbar-subtitle" id="pageHeaderSub">欢迎，Admin · 更新于 2026年8月16日 21:00</div>
     </div>
@@ -1720,8 +1739,8 @@
           <canvas id="trendChart"></canvas>
         </div>
         <div class="chart-legend">
-          <div class="chart-legend-item"><span class="chart-legend-dot" style="background:var(--accent-strong)"></span> sakana-namazu</div>
-          <div class="chart-legend-item"><span class="chart-legend-dot" style="background:var(--cyan)"></span> sakana-fugu</div>
+          <div class="chart-legend-item"><span class="chart-legend-dot" style="background:var(--accent-strong)"></span> sakana</div>
+          <div class="chart-legend-item"><span class="chart-legend-dot" style="background:var(--cyan)"></span> sakana-code</div>
           <div class="chart-legend-item"><span class="chart-legend-dot" style="background:var(--blue)"></span> 其他模型 / 思考链</div>
         </div>
       </div>
@@ -1758,11 +1777,14 @@
     <div data-pane="chat" hidden>
       <div class="chat-layout">
         <!-- Chat Left Sidebar -->
-        <div class="chat-sidebar">
+        <div class="chat-sidebar" id="chatSidebar">
           <button class="btn primary" id="btnNewChat" style="width:100%;font-size:13px;padding:9px">+ 新聊天</button>
           
-          <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;margin-top:6px">预设助理</div>
-          <div style="display:flex;flex-direction:column;gap:5px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px">
+            <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px">预设助理</div>
+            <button class="btn ghost" id="btnSavePreset" style="font-size:11px;padding:2px 8px" title="把当前模型/风格/输入保存为自定义预设">＋ 保存</button>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:5px" id="presetList">
             <div class="preset-card" data-preset="translate">
               <span>🔤</span>
               <span class="p-title">佐金奈翻译</span>
@@ -1800,12 +1822,13 @@
           </div>
         </div>
 
-        <!-- Chat Main Area -->
+          <!-- Chat Main Area -->
+        <div class="chat-drawer-backdrop" id="chatDrawerBackdrop" hidden></div>
         <div class="chat-main">
           <div class="chat-top-header">
-            <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-weight:700;color:var(--text-main)" id="chatCurrentTitle">新会话</span>
-              <span class="pill blue mono" id="chatModelBadge">sakana-namazu</span>
+            <div style="display:flex;align-items:center;gap:10px;min-width:0">
+              <button class="btn ghost sm" id="btnOpenChatDrawer" style="display:none;flex:none" title="会话列表">☰</button>
+              <span style="font-weight:700;color:var(--text-main);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" id="chatCurrentTitle">新会话</span>
             </div>
             <div style="display:flex;align-items:center;gap:8px">
               <button class="btn sm" id="btnExportChat" title="导出当前对话">📤 导出</button>
@@ -1817,7 +1840,7 @@
             <div class="chat-hero" id="chatHero">
               <div class="chat-hero-art">🐟</div>
               <div class="chat-hero-title">有什么问题都可以问</div>
-              <div class="chat-hero-desc">搭载 Sakana AI 多模态模型 · 支持思考链推理 · 实时联网搜索 · 代码高亮与文件分析</div>
+              <div class="chat-hero-desc">深度思考与联网检索按模型智能路由 · 超长上下文自动压缩 · 代码高亮与文件分析</div>
               <div class="chat-suggestions">
                 <div class="suggestion-chip" data-prompt="用 Python 实现一个支持并发连接池的异步 HTTP 请求客户端">🐍 Python 异步并发请求库</div>
                 <div class="suggestion-chip" data-prompt="请深度分析当前大语言模型在反向代理和逆向工程中的安全性考量">🔍 LLM 网关架构与安全分析</div>
@@ -1841,8 +1864,11 @@
                 <div class="chat-controls-left">
                   <button class="toggle-btn" id="btnAttachFile" title="添加附件或图片">➕ 附件</button>
                   <select class="chat-select mono" id="chatModelSelect"></select>
-                  <button class="toggle-btn active" id="btnToggleThink" title="深度思考链(必带,与联网互斥)">🧠 思考</button>
-                  <button class="toggle-btn active" id="btnToggleSearch" title="联网搜索(与思考互斥,思考开启时联网降级)">🌐 联网</button>
+                  <select class="chat-select" id="chatStyleSelect" title="回复风格">
+                    <option value="default">默认风格</option>
+                    <option value="polite">敬语风格</option>
+                    <option value="osaka">大阪风格</option>
+                  </select>
                 </div>
                 <div style="display:flex;gap:6px">
                   <button class="btn primary sm" id="btnSendChat" style="padding:6px 16px;font-weight:700">↑ 发送</button>
@@ -1964,12 +1990,12 @@
             <pre class="json-viewer mono" style="max-height:160px"><code class="language-python">from openai import OpenAI
 
 client = OpenAI(
-    api_key="sk-sak-xxx", # 或留空(开放模式)
+    api_key="sk-sakana-key",
     base_url="http://localhost:8787/v1"
 )
 
 response = client.chat.completions.create(
-    model="sakana-namazu",
+    model="sakana",
     messages=[{"role": "user", "content": "你好"}],
     stream=True
 )
@@ -1983,7 +2009,7 @@ for chunk in response:
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-sak-xxx" \
   -d '{
-    "model": "sakana-namazu",
+    "model": "sakana",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": false
   }'</code></pre>
@@ -2039,7 +2065,7 @@ for chunk in response:
             支持标准流式（SSE）与非流式调用，支持思考链（reasoning_content）、多模态图片、文本附件、联网搜索以及多轮对话自动上下文粘性绑定。
           </p>
           <div class="json-viewer mono">{
-  "model": "sakana-namazu", // 可选: sakana-namazu, sakana-fugu, sakana-namazu-polite, sakana-namazu-osaka
+    "model": "sakana", // 可选: sakana, sakana-mini, sakana-code, sakana-code-mini, sakana-writer, sakana-writer-mini, sakana-polite, sakana-osaka
   "messages": [
     { "role": "system", "content": "You are a helpful assistant." },
     { "role": "user", "content": "帮我写一首关于海洋的诗" }
@@ -2058,7 +2084,7 @@ for chunk in response:
             简化调用参数，直接传入 input 与 instructions，自动转换为标准上下文。
           </p>
           <div class="json-viewer mono">{
-  "model": "sakana-namazu",
+  "model": "sakana",
   "input": "请帮我规划一个为期三天的东京旅行路线",
   "instructions": "你是一位专业的旅行规划师",
   "stream": false
@@ -2337,7 +2363,7 @@ function switchTab(tab) {
     chat: ['Sakana Chat', '多模态对话与长上下文'],
     accounts: ['账号池管理', '上游会话池与自动保活'],
     keys: ['API 密钥管理', 'Bearer 令牌生成与应用分发'],
-    models: ['模型矩阵', '12 个标准模型，支持思考与搜索模式'],
+    models: ['模型矩阵', '8 个标准模型，搜索与思考智能路由'],
     audit: ['请求审计日志', '仅保留请求与响应元数据'],
     docs: ['API 接入文档', 'OpenAI / Anthropic 兼容接口标准'],
     settings: ['系统配置', '端点与运行时诊断'],
@@ -2345,6 +2371,10 @@ function switchTab(tab) {
   $('pageHeaderTitle').textContent = titles[tab]?.[0] || 'Sakana2API';
   $('pageHeaderSub').textContent = titles[tab]?.[1] || '';
   $('dashTopActions').style.display = tab === 'dash' ? 'flex' : 'none';
+  // Keep the pane across reloads and back/forward navigation.
+  if (location.hash !== '#' + tab) {
+    try { history.replaceState(null, '', '#' + tab); } catch {}
+  }
 
   if (tab === 'dash') refreshStats();
   if (tab === 'accounts') refreshAccounts();
@@ -2352,6 +2382,11 @@ function switchTab(tab) {
   if (tab === 'audit') refreshAudit();
   if (tab === 'models') renderModelMatrix();
 }
+
+window.addEventListener('hashchange', () => {
+  const tab = location.hash.slice(1);
+  if (tab && tab !== activeTab && document.querySelector(`[data-pane="${tab}"]`)) switchTab(tab);
+});
 
 $('brandBtn').onclick = () => switchTab('dash');
 
@@ -2365,6 +2400,18 @@ function setSidebarDrawer(open) {
 }
 $('btnOpenSidebar').onclick = () => setSidebarDrawer(true);
 $('sidebarBackdrop').onclick = () => setSidebarDrawer(false);
+
+// Chat sidebar drawer (narrow screens): toggle + backdrop close.
+function setChatDrawer(open) {
+  $('chatSidebar')?.classList.toggle('chat-drawer-open', open);
+  const backdrop = $('chatDrawerBackdrop');
+  if (backdrop) backdrop.hidden = !open;
+}
+$('btnOpenChatDrawer')?.addEventListener('click', () => setChatDrawer(true));
+$('chatDrawerBackdrop')?.addEventListener('click', () => setChatDrawer(false));
+$('chatSidebar')?.addEventListener('click', (e) => {
+  if (e.target.closest('[data-tab], .chat-history-item')) setChatDrawer(false);
+});
 $('mainSidebar').addEventListener('click', (e) => {
   if (e.target.closest('[data-tab]')) setSidebarDrawer(false);
 });
@@ -2806,6 +2853,7 @@ let retryAttachmentTimer = null;
 function initChat() {
   loadModels();
   renderChatSessions();
+  renderCustomPresets();
 }
 
 function isStandardModelId(modelId) {
@@ -2825,31 +2873,19 @@ async function loadModels() {
       : [];
     const sel = $('chatModelSelect');
     sel.innerHTML = '';
-
-    const appendGroup = (label, models) => {
-      if (!models.length) return;
-      const g = document.createElement('optgroup');
-      g.label = label;
-      models.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        const styleLabel = m.description ? m.description.split('·')[1]?.trim() || m.id : m.id;
-        opt.textContent = `${m.id} (${styleLabel})`;
-        g.appendChild(opt);
-      });
-      sel.appendChild(g);
-    };
-    appendGroup('标准模型', availableModels);
-    if (sel.options.length) sel.value = [...sel.options].some(o => o.value === 'sakana-namazu') ? 'sakana-namazu' : sel.options[0].value;
-    $('chatModelBadge').textContent = sel.value || 'sakana-namazu';
-    sel.onchange = () => { $('chatModelBadge').textContent = sel.value; };
+    availableModels.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.id;
+      sel.appendChild(opt);
+    });
+    if (sel.options.length) sel.value = [...sel.options].some(o => o.value === 'sakana') ? 'sakana' : sel.options[0].value;
     $('modelMatrixCount').textContent = `${availableModels.length} 个可用模型`;
     if (activeTab === 'models') renderModelMatrix();
   } catch (e) {
     // A transient model endpoint failure should leave the shell usable.
-    availableModels = [{ id: 'sakana-namazu', description: 'Namazu · Standard 🐟' }];
-    $('chatModelSelect').innerHTML = '<option value="sakana-namazu">sakana-namazu</option>';
-    $('chatModelBadge').textContent = 'sakana-namazu';
+    availableModels = [{ id: 'sakana', description: 'Sakana · 标准对话 · 深度思考' }];
+    $('chatModelSelect').innerHTML = '<option value="sakana">sakana</option>';
     $('modelMatrixCount').textContent = '模型列表暂不可用';
   }
 }
@@ -2948,13 +2984,18 @@ document.querySelectorAll('.preset-card').forEach(card => {
       toast('已切换预设: ' + title);
     }
     if (p === 'translate') {
-      if ($('chatModelSelect')) $('chatModelSelect').value = 'sakana-namazu';
+      if ($('chatModelSelect')) $('chatModelSelect').value = 'sakana';
+      if ($('chatStyleSelect')) $('chatStyleSelect').value = 'default';
+    } else if (p === 'marlin') {
+      if ($('chatModelSelect')) $('chatModelSelect').value = 'sakana-code';
+      if ($('chatStyleSelect')) $('chatStyleSelect').value = 'default';
     } else if (p === 'fugu') {
-      if ($('chatModelSelect')) $('chatModelSelect').value = 'sakana-fugu';
+      if ($('chatModelSelect')) $('chatModelSelect').value = 'sakana-mini';
+      if ($('chatStyleSelect')) $('chatStyleSelect').value = 'default';
     } else if (p === 'osaka') {
-      if ($('chatModelSelect')) $('chatModelSelect').value = 'sakana-namazu-osaka';
+      if ($('chatModelSelect')) $('chatModelSelect').value = 'sakana';
+      if ($('chatStyleSelect')) $('chatStyleSelect').value = 'osaka';
     }
-    $('chatModelBadge').textContent = $('chatModelSelect')?.value || 'sakana-namazu';
   };
 });
 
@@ -2965,15 +3006,75 @@ document.querySelectorAll('.suggestion-chip').forEach(chip => {
   };
 });
 
-// 思考链必带(INPUT-MODE-001 上游规则:思考与联网互斥,思考优先,联网降级)
-$('btnToggleThink').onclick = () => {
-  $('btnToggleThink').classList.add('active');
-  toast('🧠 深度思考链为必选模式,无法关闭');
-};
-$('btnToggleSearch').onclick = () => {
-  const searchOn = $('btnToggleSearch').classList.toggle('active');
-  if (searchOn) toast('🌐 联网已开启;思考开启时联网将自动降级');
-};
+// Search/thinking toggles were removed on purpose: INPUT-MODE-001 makes the
+// two mutually exclusive upstream, and the backend now routes them per model
+// profile (code/writer run a search→think chain, standard stays thinking).
+
+/* ================= Custom presets (bounded localStorage) ================= */
+const CUSTOM_PRESETS_KEY = 'sakana_custom_presets';
+const MAX_CUSTOM_PRESETS = 8;
+
+function loadCustomPresets() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CUSTOM_PRESETS_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed.slice(0, MAX_CUSTOM_PRESETS) : [];
+  } catch { return []; }
+}
+
+function saveCustomPresets(list) {
+  try { localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(list.slice(0, MAX_CUSTOM_PRESETS))); } catch {}
+}
+
+function applyPreset(model, style, prompt) {
+  if ($('chatModelSelect') && model) $('chatModelSelect').value = model;
+  if ($('chatStyleSelect') && style) $('chatStyleSelect').value = style;
+  if (prompt !== undefined && $('chatInput')) {
+    $('chatInput').value = prompt;
+    $('chatInput').style.height = 'auto';
+  }
+}
+
+function renderCustomPresets() {
+  const list = $('presetList');
+  if (!list) return;
+  list.querySelectorAll('[data-custom-preset]').forEach((el) => el.remove());
+  for (const preset of loadCustomPresets()) {
+    const item = document.createElement('div');
+    item.className = 'preset-card';
+    item.dataset.customPreset = preset.id;
+    item.innerHTML = `
+      <span>⭐</span>
+      <span class="p-title" style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(preset.title)}</span>
+      <button class="rm-btn" title="删除预设" style="cursor:pointer;border:none;background:transparent;color:var(--text-dim)">✕</button>
+    `;
+    item.querySelector('.rm-btn').onclick = (e) => {
+      e.stopPropagation();
+      saveCustomPresets(loadCustomPresets().filter((p) => p.id !== preset.id));
+      renderCustomPresets();
+    };
+    item.onclick = () => {
+      applyPreset(preset.model, preset.style, preset.prompt || '');
+      toast('已应用自定义预设: ' + preset.title);
+    };
+    list.appendChild(item);
+  }
+}
+
+$('btnSavePreset')?.addEventListener('click', () => {
+  const model = $('chatModelSelect')?.value || 'sakana';
+  const style = $('chatStyleSelect')?.value || 'default';
+  const prompt = $('chatInput')?.value.trim() || '';
+  const list = loadCustomPresets();
+  if (list.length >= MAX_CUSTOM_PRESETS) {
+    toast(`最多保存 ${MAX_CUSTOM_PRESETS} 个自定义预设`, 'err');
+    return;
+  }
+  const title = (prompt ? prompt.slice(0, 12) : model + (style !== 'default' ? '·' + style : '')) || '自定义预设';
+  list.push({ id: 'cp_' + Date.now().toString(36), title, model, style, prompt });
+  saveCustomPresets(list);
+  renderCustomPresets();
+  toast('已保存自定义预设');
+});
 
 /* ================= 角色卡 (Character Card) ================= */
 let characterCards = [];
@@ -3417,17 +3518,15 @@ async function sendChatMessage({ fromRetry = false } = {}) {
   let aiAnswer = '';
   let aiCitations = [];
 
-  const model = $('chatModelSelect').value || 'sakana-namazu';
-  const isSearchActive = $('btnToggleSearch')?.classList.contains('active') ?? true;
-  const isThinkActive = $('btnToggleThink')?.classList.contains('active') ?? true;
+  const model = $('chatModelSelect').value || 'sakana';
+  const style = $('chatStyleSelect')?.value || 'default';
 
   const reqBody = {
     model,
     messages: currentSess.messages.map(m => ({ role: m.role, content: messageToContent(m) })),
     ...(currentSess.conversationId ? { conversation_id: currentSess.conversationId } : {}),
+    ...(style && style !== 'default' ? { style } : {}),
     stream: true,
-    web_search: isSearchActive,
-    enable_thinking: isThinkActive,
   };
   // Serialize the one-shot attachment payload before releasing raw bytes from
   // the live session. The request body is now the only owner of the Data URL.
@@ -3626,20 +3725,25 @@ function renderModelMatrix() {
   models.forEach(m => {
     const card = document.createElement('div');
     card.className = 'model-card';
-    const isFugu = m.id.includes('fugu');
+    const isMini = m.id.includes('mini');
+    const isCode = m.id.includes('code');
+    const isWriter = m.id.includes('writer');
+    const tag = isCode ? '⌨️ Code' : isWriter ? '✍️ Writer' : isMini ? '🐡 Mini' : '🐟 Namazu';
+    const tagClass = isCode ? 'info' : isWriter ? 'on' : isMini ? 'blue' : 'on';
     card.innerHTML = `
       <div>
         <div class="model-card-head">
           <div class="model-card-id">${esc(m.id)}</div>
-          <span class="pill ${isFugu ? 'purple' : 'on'}">${isFugu ? '🐡 Fugu' : '🐟 Namazu'}</span>
+          <span class="pill ${tagClass}">${tag}</span>
         </div>
         <div class="model-card-desc" style="margin-top:6px">${esc(m.description || 'Sakana AI 核心多模态大语言模型')}</div>
       </div>
       <div>
         <div class="model-card-tags" style="margin-bottom:12px">
           <span class="pill blue">上下文 128k</span>
-          <span class="pill on">免费无限制</span>
-          <span class="pill info">深度思考</span>
+          <span class="pill on">深度思考</span>
+          ${isCode || isWriter ? '<span class="pill info">先搜后想</span>' : ''}
+          ${isWriter ? '<span class="pill blue">超长上下文压缩</span>' : ''}
         </div>
         <div style="display:flex;gap:6px">
           <button class="btn sm primary" style="flex:1" onclick="useModelInChat('${m.id}')">在聊天中打开</button>
@@ -3658,7 +3762,6 @@ window.useModelInChat = function(modelId) {
   }
   switchTab('chat');
   if ($('chatModelSelect')) $('chatModelSelect').value = modelId;
-  $('chatModelBadge').textContent = modelId;
 };
 
 /* ================= TAB 3: ACCOUNTS ================= */
@@ -3951,6 +4054,10 @@ setInterval(() => {
   if (activeTab === 'dash') refreshStats();
   if (activeTab === 'accounts') refreshAccounts();
 }, 10000);
+
+// Restore the last visited pane from the URL hash (deep-link friendly).
+const initialTab = location.hash.slice(1);
+if (initialTab && document.querySelector(`[data-pane="${initialTab}"]`)) switchTab(initialTab);
 
 if (!chatSessions.length) createNewChatSession();
 else selectChatSession(chatSessions[0].id);

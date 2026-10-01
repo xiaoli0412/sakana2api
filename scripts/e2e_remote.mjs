@@ -6,6 +6,7 @@ import zlib from 'node:zlib';
 const BASE = process.env.SAKANA_TEST_BASE || '';
 if (!BASE) throw new Error('Set SAKANA_TEST_BASE for remote E2E; production URLs are not implicit');
 const KEY = process.env.SAKANA_TEST_KEY || '';
+if (!KEY || process.env.BENCHMARK_CONFIRM !== '1') throw new Error('Set SAKANA_TEST_KEY and BENCHMARK_CONFIRM=1 for authorized remote E2E');
 const AUTH = { authorization: 'Bearer ' + KEY };
 let fails = 0;
 const ok = (name, cond, extra = '') => {
@@ -61,7 +62,7 @@ console.log('== R1. pool: 10 distinct accounts ==');
 
 console.log('== R2. basic chat streaming ==');
 {
-  const r = await chat({ model: 'sakana-namazu', messages: [{ role: 'user', content: '只回答:远程OK' }] });
+  const r = await chat({ model: 'sakana', messages: [{ role: 'user', content: '只回答:远程OK' }] });
   ok('stream ok', r.stream === true && r.content.length > 0, JSON.stringify(r).slice(0, 120));
   ok('finish stop', r.finish === 'stop', String(r.finish));
   ok('conversation header', !!r.conversationId);
@@ -78,7 +79,7 @@ console.log('== R3. image upload (multimodal) ==');
   for(let y=0;y<h;y++){ raw[y*(w*4+1)]=0; for(let x=0;x<w;x++){ const o=y*(w*4+1)+1+x*4; raw[o]=255; raw[o+1]=0; raw[o+2]=0; raw[o+3]=255; } }
   const png=Buffer.concat([Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]), chunk('IHDR',ihdr), chunk('IDAT',zlib.deflateSync(raw)), chunk('IEND',Buffer.alloc(0))]);
   const realPng = png.toString('base64');
-  const r = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: [
+  const r = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: [
     { type: 'text', text: '这张图片是什么颜色?只回答两个字。' },
     { type: 'image_url', image_url: { url: 'data:image/png;base64,' + realPng } },
   ] }] }, 200000);
@@ -89,7 +90,7 @@ console.log('== R3. image upload (multimodal) ==');
 
   // text file
   const fileData = 'data:text/plain;base64,' + Buffer.from('机密数字 8848').toString('base64');
-  const rf = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: [
+  const rf = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: [
     { type: 'text', text: '文件里的机密数字是什么?只回答数字。' },
     { type: 'file', name: 'secret.txt', mime: 'text/plain', file_url: fileData },
   ] }] });
@@ -100,8 +101,8 @@ console.log('== R3. image upload (multimodal) ==');
 await sleep(6000);
 console.log('== R4. conversation continuity (ghost fix) ==');
 {
-  const r1 = await chat({ model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: '我叫小李,记住。' }] });
-  const r2 = await chat({ model: 'sakana-namazu', stream: false, messages: [
+  const r1 = await chat({ model: 'sakana', stream: false, messages: [{ role: 'user', content: '我叫小李,记住。' }] });
+  const r2 = await chat({ model: 'sakana', stream: false, messages: [
     { role: 'user', content: '我叫小李,记住。' },
     { role: 'assistant', content: r1.text || '' },
     { role: 'user', content: '我叫什么?' },
@@ -115,8 +116,8 @@ console.log('== R4. conversation continuity (ghost fix) ==');
 await sleep(6000);
 console.log('== R5. tool round-trip ==');
 {
-  const r1 = await chat({ model: 'sakana-namazu', stream: false, tools: [{ type: 'function', function: { name: 'get_weather', description: '天气' } }], messages: [{ role: 'user', content: '北京天气?调用 get_weather 查' }] });
-  const r2 = await chat({ model: 'sakana-namazu', stream: false, messages: [
+  const r1 = await chat({ model: 'sakana', stream: false, tools: [{ type: 'function', function: { name: 'get_weather', description: '天气' } }], messages: [{ role: 'user', content: '北京天气?调用 get_weather 查' }] });
+  const r2 = await chat({ model: 'sakana', stream: false, messages: [
     { role: 'user', content: '北京天气?调用 get_weather 查' },
     { role: 'assistant', content: r1.text || '' },
     { role: 'tool', name: 'get_weather', tool_call_id: 'call_1', content: '{"weather":"晴","temp":"25C"}' },
@@ -129,15 +130,15 @@ console.log('== R5. tool round-trip ==');
 await sleep(6000);
 console.log('== R6. multi-format endpoints ==');
 {
-  const r =  await fetch(BASE + '/v1/completions', { method: 'POST', headers: { 'content-type': 'application/json', ...AUTH }, body: JSON.stringify({ model: 'sakana-namazu', prompt: '回答: legacy', max_tokens: 10 }), signal: AbortSignal.timeout(120000) });
+  const r =  await fetch(BASE + '/v1/completions', { method: 'POST', headers: { 'content-type': 'application/json', ...AUTH }, body: JSON.stringify({ model: 'sakana', prompt: '回答: legacy', max_tokens: 10 }), signal: AbortSignal.timeout(120000) });
   const j = await r.json();
   ok('legacy completions 200 + text', r.ok && !!j.choices?.[0]?.text, JSON.stringify(j).slice(0, 120));
 
-  const r2 =  await fetch(BASE + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json', ...AUTH }, body: JSON.stringify({ model: 'sakana-namazu', input: '回答: response' }), signal: AbortSignal.timeout(120000) });
+  const r2 =  await fetch(BASE + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json', ...AUTH }, body: JSON.stringify({ model: 'sakana', input: '回答: response' }), signal: AbortSignal.timeout(120000) });
   const j2 = await r2.json();
   ok('responses 200 + output_text', r2.ok && !!j2.output?.[0]?.content?.[0]?.text, JSON.stringify(j2).slice(0, 120));
 
-  const r3 =  await fetch(BASE + '/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', ...AUTH }, body: JSON.stringify({ model: 'sakana-namazu', messages: [{ role: 'user', content: '回答: anthropic' }] }), signal: AbortSignal.timeout(120000) });
+  const r3 =  await fetch(BASE + '/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', ...AUTH }, body: JSON.stringify({ model: 'sakana', messages: [{ role: 'user', content: '回答: anthropic' }] }), signal: AbortSignal.timeout(120000) });
   const j3 = await r3.json();
   ok('anthropic 200 + text', r3.ok && !!j3.content?.[0]?.text, JSON.stringify(j3).slice(0, 120));
 }
@@ -145,7 +146,7 @@ console.log('== R6. multi-format endpoints ==');
 await sleep(6000);
 console.log('== R7. cache + stats ==');
 {
-  const body = { model: 'sakana-namazu', stream: false, messages: [{ role: 'user', content: '缓存测试:输出 CACHE-REMOTE-OK' }] };
+  const body = { model: 'sakana', stream: false, messages: [{ role: 'user', content: '缓存测试:输出 CACHE-REMOTE-OK' }] };
   await chat(body);
   await chat(body);
   const st = await (await fetch(BASE + '/api/stats', { headers: AUTH })).json();
@@ -156,7 +157,8 @@ console.log('== R7. cache + stats ==');
 console.log('== R8. model matrix ==');
 {
   const m = await (await fetch(BASE + '/v1/models', { headers: AUTH })).json();
-  ok('12 models', m.data && m.data.length === 12, String(m.data && m.data.length));
+  ok('8 public models', m.data && m.data.length === 8, String(m.data && m.data.length));
+  ok('public model ids are profile names', Array.isArray(m.data) && m.data.some(x => x.id === 'sakana-code') && m.data.some(x => x.id === 'sakana-writer'));
 }
 
 console.log('\n' + (fails === 0 ? 'ALL REMOTE E2E PASSED' : fails + ' FAILURES'));

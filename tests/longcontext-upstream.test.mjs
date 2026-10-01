@@ -234,6 +234,38 @@ try {
   assert.ok(attachmentPayload.length > attachment.length, `text attachment is not truncated before upstream: ${attachmentPayload.length}`);
 
   assert.equal(upstreamState.compacts, 3, `each conversation compacts once: ${upstreamState.compacts}`);
+
+  // JSON packaging (context_format:'json'): turn-structured context document.
+  const jsonTurnA = `JSON-CH1\n${'第一章内容。'.repeat(2200)}\nMID-CH1`;
+  const jsonTurnB = `JSON-CH2\n${'第二章内容。'.repeat(2200)}\nEND-CH2`;
+  const jsonDoc = await chat({
+    model: 'sakana-namazu',
+    stream: false,
+    context_format: 'json',
+    messages: [
+      { role: 'system', content: '你是连载小说续写助手' },
+      { role: 'user', content: jsonTurnA },
+      { role: 'assistant', content: '好的,我已读完第一章。' },
+      { role: 'user', content: jsonTurnB },
+    ],
+  });
+  assert.equal(jsonDoc.response.status, 200, `json packaging failed: ${JSON.stringify(jsonDoc.body)}\n${childOutput.join('')}`);
+  const jsonGeneration = upstreamState.generations.at(-1);
+  const jsonFile = jsonGeneration.files.find((file) => file.filename === 'base64;context_document.json');
+  assert.ok(jsonFile, 'json packaging uploads context_document.json');
+  const jsonParsed = JSON.parse(jsonFile.decoded.toString('utf8'));
+  assert.equal(jsonParsed.schema, 'sakana-context/1');
+  assert.ok(jsonParsed.system.includes('连载小说续写助手'), 'json document keeps system prompt');
+  assert.equal(jsonParsed.turns.length, 3, 'json document keeps turn boundaries');
+  assert.equal(jsonParsed.turns[0].role, 'user');
+  assert.ok(jsonParsed.turns[0].content.includes('JSON-CH1') && jsonParsed.turns[0].content.includes('MID-CH1'), 'json turn 1 intact');
+  assert.ok(jsonParsed.turns[2].content.includes('END-CH2'), 'json turn 3 intact');
+  const requestText = String(jsonGeneration.data.inputs);
+  assert.ok(requestText.includes('文档使用协议'), 'document protocol injected above user system');
+  assert.ok(requestText.includes('唯一事实来源'), 'document protocol present');
+  assert.ok(requestText.includes('sakana-context/1'), 'json wrapper mentions the schema');
+  assert.ok(requestText.length < 6000, 'visible prompt stays bounded while document is attached');
+
   console.log(`long-context upstream tests: all passed (generations=${upstreamState.generations.length}, gets=${upstreamState.gets}, compacts=${upstreamState.compacts})`);
 } finally {
   child.kill('SIGTERM');

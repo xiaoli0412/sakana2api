@@ -41,10 +41,11 @@ console.log('== 2. Gemini 模型名映射 ==');
       check(`${name} RP token rejects`, error.code === RP_MODEL_ERROR_CODE && error.errorCode === RP_MODEL_ERROR_CODE, `${error.code}/${error.errorCode}`);
     }
   }
-  check('Gemini default is standard sakana-namazu', DEFAULT_GEMINI_MODEL === 'sakana-namazu', DEFAULT_GEMINI_MODEL);
-  check('gemini-2.5-flash -> default standard model', mapGeminiModel('gemini-2.5-flash') === 'sakana-namazu', mapGeminiModel('gemini-2.5-flash'));
-  check('gemini-2.5-pro含namazu关键词不冲突', mapGeminiModel('gemini-2.5-pro') === 'sakana-namazu');
-  check('standard alias preserved', mapGeminiModel('sakana-namazu-polite') === 'sakana-namazu-polite');
+  check('Gemini default is standard sakana', DEFAULT_GEMINI_MODEL === 'sakana', DEFAULT_GEMINI_MODEL);
+  check('gemini-2.5-flash -> default standard model', mapGeminiModel('gemini-2.5-flash') === 'sakana', mapGeminiModel('gemini-2.5-flash'));
+  check('gemini-2.5-pro does not match sakana keyword', mapGeminiModel('gemini-2.5-pro') === 'sakana');
+  check('legacy polite alias maps to polite profile', mapGeminiModel('sakana-namazu-polite') === 'sakana-polite');
+  check('legacy fugu alias maps to mini profile', mapGeminiModel('sakana-fugu') === 'sakana-mini');
 }
 
 console.log('== 3. Gemini 请求体 -> chat 请求体 ==');
@@ -70,7 +71,7 @@ console.log('== 3. Gemini 请求体 -> chat 请求体 ==');
   check('temperature 透传', chat.temperature === 1);
   check('maxOutputTokens 截断到 65535', chat.max_tokens === 65535, String(chat.max_tokens));
   check('stream 透传', chat.stream === true);
-  check('模型落到标准默认模型', chat.model === 'sakana-namazu', chat.model);
+  check('模型落到标准默认模型', chat.model === 'sakana', chat.model);
 
   // 末尾是 assistant 轮(客户端带上轮回复)→ 剥掉
   const chat2 = geminiRequestToChat({
@@ -277,7 +278,7 @@ console.log('== 8. 响应适配器:OpenAI 管线输出 -> Gemini 协议 ==');
 console.log('== 9. Gemini 模型列表 ==');
 {
   const list = geminiModelList();
-  check('models 数组', Array.isArray(list.models) && list.models.length === 12);
+  check('models 数组', Array.isArray(list.models) && list.models.length === 8);
   check('RP models omitted', list.models.every((m) => !m.name.includes('-rp')));
   check('name 前缀 models/', list.models.every((m) => m.name.startsWith('models/')));
   check('支持 generateContent', list.models.every((m) => m.supportedGenerationMethods.includes('streamGenerateContent')));
@@ -291,7 +292,7 @@ console.log('== 9b. 单模型详情 ==');
   check('RP 详情不存在', geminiModelDetail('sakana-namazu-rp') === null);
   check('RP models/ 详情不存在', geminiModelDetail('models/sakana-fugu-rp') === null);
   check('未知模型返回 null', geminiModelDetail('gemini-2.5-flash') === null);
-  check('大小写不敏感', !!geminiModelDetail('SAKANA-NAMAZU'));
+  check('大小写不敏感', !!geminiModelDetail('SAKANA'));
   try {
     geminiRequestToChat({ model: 'sakana-fugu-rp', contents: [{ role: 'user', parts: [{ text: '拒绝' }] }] }, { model: 'x', stream: false });
     check('body.model RP rejects before mapping', false, 'did not throw');

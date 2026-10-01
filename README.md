@@ -48,7 +48,7 @@
 | **思维链 (reasoning)** | `thinking: true` / `reasoning_effort` | ✅ 原生 Token 级 |
 | **Web 搜索** | `web_search: true` | ✅ 结构化 citations |
 | **多模态图片** | `content: [{type:"image_url",...}]` | ✅ data: URI 上传 |
-| **风格切换** | `model: "sakana-namazu:polite"` | ✅ Standard/Polite/Osaka |
+| **风格切换** | `model: "sakana-polite"` 或 `style: "polite"` | ✅ Standard/Polite/Osaka |
 | **工具调用** | `tools: [...]` | ✅ run_python / search / read_file / run_command |
 | **MCP / Coding** | 自动支持 | ✅ 协议层完整,服务端自主执行 |
 | **多轮续聊** | `conversation_id` 参数 | ✅ |
@@ -125,10 +125,9 @@ DISPLAY=:99 node server.js
 curl -s http://127.0.0.1:8787/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "sakana-namazu",
+    "model": "sakana",
     "messages": [{"role":"user","content":"今天东京天气怎么样？"}],
     "stream": true,
-    "thinking": true,
     "web_search": true
   }'
 ```
@@ -138,10 +137,10 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="sk-any")
 resp = client.chat.completions.create(
-  model="sakana-namazu:polite",
+  model="sakana-polite",
   messages=[{"role":"user","content":"你好"}],
   stream=True,
-  extra_body={"thinking": True, "web_search": True}
+  extra_body={"style": "polite"}
 )
 for chunk in resp:
     if chunk.choices[0].delta.reasoning_content:
@@ -154,28 +153,21 @@ for chunk in resp:
 
 ### `GET /v1/models`
 
-12 个标准模型(2 个上游模型 × 3 种风格 × 默认/搜索两种模式):
+8 个公开模型（标准 / code / writer profile，full / mini 分层；旧模型名仅作为隐藏兼容别名）:
 
 | 模型 ID | 说明 |
 |---------|------|
-| `sakana-namazu` | Namazu · Standard · 默认(思考模式) |
-| `sakana-namazu-search` | Namazu · Standard · 显式搜索模式 |
-| `sakana-namazu-polite` | Namazu · Polite · 默认(思考模式) |
-| `sakana-namazu-polite-search` | Namazu · Polite · 显式搜索模式 |
-| `sakana-namazu-osaka` | Namazu · Osaka · 默认(思考模式) |
-| `sakana-namazu-osaka-search` | Namazu · Osaka · 显式搜索模式 |
-| `sakana-fugu` | Fugu · Standard · 默认(思考模式) |
-| `sakana-fugu-search` | Fugu · Standard · 显式搜索模式 |
-| `sakana-fugu-polite` | Fugu · Polite · 默认(思考模式) |
-| `sakana-fugu-polite-search` | Fugu · Polite · 显式搜索模式 |
-| `sakana-fugu-osaka` | Fugu · Osaka · 默认(思考模式) |
-| `sakana-fugu-osaka-search` | Fugu · Osaka · 显式搜索模式 |
+| `sakana` | 标准 · 深度思考 |
+| `sakana-mini` | 标准轻量 · 深度思考 |
+| `sakana-code` | 编程 · 长思维链 · 工具强化 · 先搜后想 |
+| `sakana-code-mini` | 编程轻量 · 工具强化 · 先搜后想 |
+| `sakana-writer` | 超长文本写作 · TXT/JSON/光学压缩 |
+| `sakana-writer-mini` | 写作轻量 · 上下文压缩管线 |
+| `sakana-polite` | 敬语风格 · 深度思考 |
+| `sakana-osaka` | Osaka 风格 · 深度思考 |
 
-> 思考链是模型**天生自带**的(任何对话都会产生 reasoning_content),无需单独开关。
-> 思考与搜索在上游互斥(INPUT-MODE-001,两者同开会 400):`-search` 后缀显式
-> 切换为搜索模式(关闭思考,代理把搜索过程与来源合成进 reasoning_content,
-> 客户端在思维链里能看到"正在搜索 / 搜索结果")。旧冒号格式(`sakana-namazu:polite`)仍兼容。
-> 旧版 `-rp`/`:rp` 模型已下线;请求会稳定返回 `400 RP-MODEL-DISABLED`,不会创建上游会话。
+> 标准模型默认深度思考；code/writer 默认先搜索再思考。上游搜索与思考互斥，代理会自动分成两轮并合并来源。
+> 旧冒号风格格式仍兼容，但建议使用 `style` 参数。旧版 `-rp`/`:rp` 模型已下线；请求会稳定返回 `400 RP-MODEL-DISABLED`,不会创建上游会话。
 
 ### `POST /v1/chat/completions`
 
@@ -366,18 +358,19 @@ sakana-2api/
 | `ACCOUNT_STALE_MS` | `900000` | 账号 cookie 被视为 stale 的时间；stale 账号仅在没有新鲜可用账号时参与调度 |
 | `RATE_LIMIT_COOLDOWN_MS` | `600000` | 账号级限流冷却时间 |
 | `HARVEST_RETRIES` | `3` | 单个补池槽位的 harvest 重试次数 |
+| `HARVEST_CONCURRENCY` | `1` | 补池并发数，默认串行；仅设为 `2` 或 `3` 时启用独立临时浏览器 context |
 | `HARVEST_BACKOFF_MS` | `300000` | harvest 失败后的退避时间(低于 critical threshold 时跳过) |
 | `MAX_CONCURRENT_PER_ACCOUNT` | `6` | 单账号同时持有的最大请求租约数 |
 | `QUEUE_TIMEOUT_MS` | `60000` | 全局并发队列等待超时 |
 | `ACCOUNT_TOMBSTONE_TTL_MS` | `86400000` | expired/rate_limited 记录保留时间 |
-| `CACHE_ENABLED` | `true` | 请求缓存开关 |
+| `CACHE_ENABLED` | `false` | 请求缓存开关，默认关闭；设为 `true` 才启用 |
 | `CACHE_HIT_RATE` | `0.93` | 缓存命中率(0–1,可调 0.90/0.95) |
 | `CACHE_TTL` | `60000` | 缓存 TTL(ms) |
 | `UPSTREAM_TIMEOUT_MS` | `300000` | 上游生成超时(ms) |
 | `UPSTREAM_BOOTSTRAP_MS` | `60000` | 上游建会话超时(ms) |
 | `TOOL_PROMPT` | `1` | `0` 时关闭自定义工具提示注入 |
-| `GEMINI_DEFAULT_MODEL` | `sakana-namazu` | Gemini 端点模型名兜底映射 |
-| `DEBUG_PROMPT_LEN` | `500` | `DEBUG_PROMPT=1` 时打印的 prompt 前 N 字符 |
+| `GEMINI_DEFAULT_MODEL` | `sakana` | Gemini 端点模型名兜底映射 |
+| `DEBUG_PROMPT` | unset | 设为 `1` 时记录受限长度的 prompt 调试摘要；默认不记录正文 |
 | `SAKANA_BASE` | `https://chat.sakana.ai` | 上游地址(测试用) |
 
 **鉴权模式(三态):**
@@ -395,11 +388,7 @@ sakana-2api/
 
 ## ⚠️ 注意事项
 
-- **自动模式**: 首次启动需 60–120 秒(过盾 + 收信 + 登录)。账户池会在后台持续
-  收割**独立邮箱的新账户**并保持 `ACCOUNT_POOL_MIN` 个活跃账户(默认 50),按
-  `ACCOUNT_REFRESH_MS` 刷新 cookie,失败自动隔离并补池。账号选择、请求租约和
-  补池/刷新均为 single-flight；`/api/stats` 与管理员 `/api/accounts` 可查看安全的
-  状态、租约和补池指标，但不会返回 cookie/token。
+- **账号池与注册**: 默认使用一个 persistent browser context 串行执行登录、刷新和补池，避免身份互相覆盖。设置 `HARVEST_CONCURRENCY=2` 或 `3` 才启用有界独立临时 context；停止服务时会取消并关闭这些 context。浏览器、cookie 和 Firebase token 只保留在服务端。
 - **手动模式**: `AUTO_SESSION=false` 时不启动浏览器、不补池、不刷新旧 account pool，
   只从 `SAKANA_SESSION_FILE` 读取一个显式会话。
 - **临时邮箱**: 每个新账户一个 mail.tm 临时邮箱(独立账号),免费额度绑定账号

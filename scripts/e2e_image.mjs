@@ -2,7 +2,7 @@ import fs from 'fs';
 const BASE = 'http://127.0.0.1:8787';
 const b64 = fs.readFileSync('red64.png').toString('base64');
 const body = {
-  model: 'sakana-namazu',
+  model: 'sakana',
   stream: false,
   messages: [{ role: 'user', content: [
     { type: 'text', text: '这张图片是什么颜色?回答一个颜色词' },

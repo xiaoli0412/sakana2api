@@ -32,7 +32,17 @@ PATCH/DELETE /api/v2/conversations/{id} (改名/删除)
   `AUTH-TOKEN-002` token 无效过期 / `AUTH-BOT-001` bot 验证失败(重载页) /
   `RATE-ANON-001` 匿名限额 / `RATE-MODEL-001/002` 模型日/周限额。
 
-## 3. 建会话
+## 3. 模型与路由
+
+公开模型固定为 8 个：`sakana`、`sakana-mini`、`sakana-code`、`sakana-code-mini`、
+`sakana-writer`、`sakana-writer-mini`、`sakana-polite`、`sakana-osaka`。旧的 Namazu/Fugu
+模型名只作为隐藏兼容别名，不会出现在模型列表；任何包含 `rp`、`roleplay` 或
+`role-play` 的名称都会在映射前返回 `RP-MODEL-DISABLED`。
+
+标准模型默认深度思考；code/writer profile 默认执行“先搜索、后思考”的两轮链，
+因为上游 `webSearchEnabled` 与 `enableThinking` 互斥。显式 `web_search`、工具回合或
+`SAKANA_SEARCH_CHAIN=off` 会回退到单轮互斥模式。搜索来源会合并到最终 citations。
+
 
 ```
 POST /api/conversation
@@ -52,8 +62,19 @@ body:  FormData
       enableThinking: bool, toneMode: character, webSearchEnabled: bool,
       userMessageId?, model? }
   files = 每个文件一个 part: new File([content], `${type};${name}`, { type: mime })
-响应: text/event-stream 风格 NDJSON —— 逐行 JSON(每行一个对象),非 `data:` 前缀
+响应: text/event-stream 风格 NDJSON ——逐行 JSON(每行一个对象),非 `data:` 前缀
 ```
+
+## 5. 超长上下文附件
+
+长文本会以 `context_document.txt` 或 `context_document.json` 作为 synthetic multipart
+附件发送，避免只在代理内存中拼接后被截断。JSON 文档使用 `sakana-context/1` schema，
+保留 system 与 turns 边界；请求体可用 `context_format`，也可用 `x-context-format`
+请求头选择格式。writer profile 超过 `OPTICAL_CONTEXT_THRESHOLD` 后，旧历史可被渲染
+为带页标的 PNG，近期尾部仍保留 TXT；渲染失败自动回退完整文本。光学压缩不等于突破
+上游上下文硬限制，真实准确率必须通过授权基准测量。
+
+
 
 ### NDJSON 行(update)类型(translate 依据)
 
@@ -107,9 +128,10 @@ toolResult.output = { query, formattedResults, sources: [{ title, url, content? 
 ## 6. 思考/风格
 
 - 思考:`reasoning` update 增量;内容含 `<thinking>...</thinking> <plan>...</plan> <answer>...</answer>` 标记。
-- 风格 toneMode:默认 `default`;UI 有 `Standard 🐟 / Polite 🐠 / Osaka 🐙`。
-- 模型:匿名仅 `sakana-namazu`;Fugu 需登录;另有 Marlin/Translate 子应用。
-  - 内部 model 字符串:`sakana-namazu`(UI 名字 Namazu)。
+- 风格 toneMode:默认 `default`;公开风格模型为 `sakana`、`sakana-polite`、`sakana-osaka`，也可通过 `style` 参数覆盖。
+- 公开模型固定为 8 个 profile：`sakana`、`sakana-mini`、`sakana-code`、`sakana-code-mini`、
+  `sakana-writer`、`sakana-writer-mini`、`sakana-polite`、`sakana-osaka`。
+  full 档映射上游 `sakana-namazu`，mini 档映射上游 `fugu`；旧 Namazu/Fugu 名称仅作兼容别名。
 
 ## 7. 文件上传
 
