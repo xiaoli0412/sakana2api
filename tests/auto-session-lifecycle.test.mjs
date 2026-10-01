@@ -134,6 +134,28 @@ resolveIsolatedLaunch({
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(lateBrowserCloseCount, 1, 'late isolated browser launch is closed after stop');
 
+// An isolated refresh crash must stay scoped to the disposable context: the
+// shared persistent context is neither discarded nor counted as a recovery.
+autoSession.__testing.reset();
+autoSession.__testing.setWait(async () => {});
+autoSession.__testing.setLauncher(async () => fakeContext());
+await autoSession.__testing.ensureBrowser();
+assert.equal(autoSession.__testing.status().hasContext, true, 'persistent context is live before isolated crash');
+let isolatedLaunchAttempts = 0;
+autoSession.__testing.setIsolatedLauncher(async () => {
+  isolatedLaunchAttempts++;
+  throw new Error('Target crashed');
+});
+await assert.rejects(
+  () => autoSession.refreshAccount({ cookies: [{ name: 'sakana-chat', value: 'x', domain: '.sakana.ai', path: '/' }] }),
+  /Target crashed/,
+);
+assert.ok(isolatedLaunchAttempts >= 3, 'isolated crash retries stay on the isolated launcher');
+assert.equal(autoSession.__testing.status().hasContext, true, 'persistent context survives isolated refresh crash');
+assert.equal(autoSession.__testing.status().recoveries, 0, 'isolated crash does not pollute global recovery counters');
+
+autoSession.__testing.setIsolatedLauncher(null);
+
 autoSession.__testing.setIsolatedLauncher(null);
 autoSession.__testing.setLauncher(null);
 autoSession.__testing.setWait(null);
