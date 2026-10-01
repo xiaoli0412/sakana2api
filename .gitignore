@@ -88,3 +88,7 @@ mailmsg*.json
 scripts/.ssh_secret.json
 keys.json
 .playwright-mcp/
+
+# Rust native module build artifacts (optional, rebuilt via npm run build:native)
+native/target/
+native/index.node

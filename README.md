@@ -371,6 +371,7 @@ sakana-2api/
 | `TOOL_PROMPT` | `1` | `0` 时关闭自定义工具提示注入 |
 | `GEMINI_DEFAULT_MODEL` | `sakana` | Gemini 端点模型名兜底映射 |
 | `DEBUG_PROMPT` | unset | 设为 `1` 时记录受限长度的 prompt 调试摘要；默认不记录正文 |
+| `SAKANA_NATIVE` | auto | `0` 强制 JS 热点实现；默认自动加载已构建的 Rust 模块（`npm run build:native`，未构建时走 JS fallback，无功能差异） |
 | `SAKANA_BASE` | `https://chat.sakana.ai` | 上游地址(测试用) |
 
 **鉴权模式(三态):**
@@ -403,6 +404,7 @@ sakana-2api/
   base64 解码(send 原始字节会导致文件损坏,已修复)。多模态识别由上游模型完成。
 - **静默失败**: 上游超时/空响应/中断均以 SSE `finish_reason:"error"` 或 JSON 错误
   上报,并记入审计日志,不再假装成功。
+- **性能专项**: 可选 Rust 原生模块加速热点（`npm run build:native`，需 cargo；未构建时 JS fallback，行为一致）。浏览器 CPU/内存/磁盘 profiling 用 `SAKANA_PROFILE_CONFIRM=1 node scripts/profile_browser.mjs --duration 300`，方法论与实测数据见 [docs/performance-rust.md](docs/performance-rust.md)。
 - **编码**: 确保终端支持 UTF-8。Windows 推荐在 Git Bash 或 VSCode 终端中运行。
 
 ---
