@@ -92,3 +92,7 @@ keys.json
 # Rust native module build artifacts (optional, rebuilt via npm run build:native)
 native/target/
 native/index.node
+
+# deployment admin key (local only)
+scripts/.admin_key
+scripts/provision_and_deploy.py

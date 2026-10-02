@@ -8,7 +8,7 @@ const { randomUUID } = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { MODELS, openaiRequestToSakana, normalizedMessagesToPrompt, assertStandardModel, NdjsonTranslator, sse, clean, stripChips, extractFileContent, buildSearchChainPrompt, renderChainSources, mergeCitations } = require('./lib/translate');
 const { anthropicToChat, chatToAnthropicNonStream, AnthropicStreamer } = require('./lib/anthropic');
-const { SakanaUpstream, UpstreamError, closeGlobalDispatcher } = require('./lib/upstream');
+const { SakanaUpstream, UpstreamError, closeGlobalDispatcher, probeSession } = require('./lib/upstream');
 const { getSession, loadSession, setReloadHandler, SESSION_FILE } = require('./lib/session');
 const { autoSession } = require('./lib/auto-session');
 const { Stats, KeyStore } = require('./lib/stats');
@@ -2174,6 +2174,64 @@ const server = http.createServer(async (req, res) => {
         const safe = sanitizeError(e, 500);
         return sendJson(res, clientErrorStatus(e, 500), { error: { message: safe.message, type: safe.category, code: safe.code } });
       }
+    }
+
+    // 2026-10: upstream blocks disposable-email registration (AUTH-EMAIL-001 /
+    // USER_DISABLED), so automated harvest cannot create accounts anymore.
+    // Admins seed the pool by importing a session cookie from a browser where
+    // they signed in to chat.sakana.ai manually.
+    if (req.method === 'POST' && p === '/api/accounts/import') {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
+      let b;
+      try { b = JSON.parse((await readBody(req)).toString('utf8')); }
+      catch (e) {
+        if (req.__signal?.aborted) throw e;
+        return sendJson(res, 400, { error: { message: 'invalid JSON' } });
+      }
+      let cookieHeader = String(b?.cookieHeader || '').trim();
+      if (!cookieHeader && Array.isArray(b?.cookies)) {
+        cookieHeader = b.cookies
+          .filter((c) => c && c.name && c.value)
+          .map((c) => `${c.name}=${c.value}`)
+          .join('; ');
+      }
+      if (!/(?:^|;\s*)sakana-chat=[^;]+/.test(cookieHeader)) {
+        return sendJson(res, 400, { error: { message: 'cookieHeader must contain a sakana-chat cookie', code: 'INVALID-SESSION' } });
+      }
+      const probe = await probeSession(cookieHeader).catch(() => ({ ok: false, status: 0 }));
+      if (!probe.ok) {
+        return sendJson(res, 400, {
+          error: {
+            message: `session cookie rejected by upstream (status ${probe.status}) — sign in at chat.sakana.ai and copy a fresh sakana-chat cookie`,
+            code: 'SESSION-REJECTED',
+          },
+        });
+      }
+      const id = accountPool.upsert({
+        cookieHeader,
+        // refreshAccount needs structured cookies; synthesize them for a
+        // header-only import so the session can be refreshed later.
+        cookies: Array.isArray(b?.cookies) && b.cookies.length
+          ? b.cookies
+          : cookieHeader.split(/;\s*/).filter(Boolean).map((pair) => {
+              const eq = pair.indexOf('=');
+              return {
+                name: pair.slice(0, eq),
+                value: pair.slice(eq + 1),
+                domain: 'chat.sakana.ai',
+                path: '/',
+              };
+            }),
+        savedAt: Date.now(),
+        loggedIn: true,
+        uid: String(b?.uid || ''),
+        email: String(b?.email || ''),
+      });
+      if (!id) {
+        return sendJson(res, 409, { error: { message: 'session already in pool or pool entry quarantined', code: 'DUPLICATE-SESSION' } });
+      }
+      console.log(`[accounts] imported session cookie via admin (pool size ${accountPool.count()})`);
+      return sendJson(res, 200, { ok: true, id, poolSize: accountPool.count() });
     }
 
     // Cache endpoints

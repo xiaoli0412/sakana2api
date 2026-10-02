@@ -131,7 +131,15 @@ toolResult.output = { query, formattedResults, sources: [{ title, url, content? 
 - 风格 toneMode:默认 `default`;公开风格模型为 `sakana`、`sakana-polite`、`sakana-osaka`，也可通过 `style` 参数覆盖。
 - 公开模型固定为 8 个 profile：`sakana`、`sakana-mini`、`sakana-code`、`sakana-code-mini`、
   `sakana-writer`、`sakana-writer-mini`、`sakana-polite`、`sakana-osaka`。
-  full 档映射上游 `sakana-namazu`，mini 档映射上游 `fugu`；旧 Namazu/Fugu 名称仅作兼容别名。
+  full 档映射上游 `sakana-namazu`，mini 档映射上游 `fugu-max`（2026-10 客户端注册表实证，`fugu` 单名已从 bundle 消失；可用 `SAKANA_MINI_UPSTREAM` 热修）；旧 Namazu/Fugu 名称仅作兼容别名。
+
+## 6b. 2026-10 上游变化（实测）
+
+- **Cloudflare Turnstile 会话闸门**: 新 UI 在 session bootstrap 时插入 Turnstile 挑战(sitekey `0x4AAAAAAD7JJzk0xcJKoYwj`),自适应模式下会出现交互式复选框遮罩(`.fixed.inset-0.bg-black/60`);闸门未放行时 SPA 无法完成 `POST /api/auth/login`,cookie 不会种下。auto-session 已内置 `passTurnstileGate()`(等待+点击)。
+- **登录流**: magic link → Firebase `signInWithEmailLink`(成功,返回 idToken) → 回跳 `/login?apiKey=…` → 客户端 `POST /api/auth/login`(FormData: `idToken` + `turnstileToken`)。**上游封锁一次性邮箱**: 该调用对 mail.tm 域名返回 `403 AUTH-EMAIL-001`,随后账号 `USER_DISABLED`。cookie 仅在登录成功后由服务端种植;`sakana-chat` cookie 单独存在不代表会话有效——有效性以 `/api/v2/user/settings`(200)为准。
+- **每模型配额端点**: `GET /api/rate-limit/status`(需登录),返回 `{models:[{id,exceeded}]}`;未登录 401 `AUTH-LOGIN-001`。
+- **模型注册表**(bundle 实证): 匿名态 `availableModels` = `sakana-namazu`(multimodal image/*, thinking:false, anonymousAccess:true) + `fugu-max`("Orchestrates diverse models", thinking:false, 匿名不可用);代码另有 `fugu-ultra` 特判分支(登录档位,待实测确认)。文件类型白名单: image/*、application/pdf、text/plain、text/markdown、application/json、docx、csv、xlsx、html、pptx。
+- **账号补充路径**: 自动注册被封锁期间,用管理接口 `POST /api/accounts/import`(body `{cookieHeader}`)导入人工登录获得的会话;导入前先经 `/api/v2/user/settings` 验证。
 
 ## 7. 文件上传
 

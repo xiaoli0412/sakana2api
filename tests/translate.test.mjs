@@ -28,11 +28,11 @@ console.log('== 1b. hyphen model matrix parsing (8 public + legacy aliases) ==')
   const cases = [
     // 8 public profiles
     ['sakana', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
-    ['sakana-mini', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-mini', { m: 'fugu-max', tone: 'default', search: false, think: true, rp: false }],
     ['sakana-code', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
-    ['sakana-code-mini', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-code-mini', { m: 'fugu-max', tone: 'default', search: false, think: true, rp: false }],
     ['sakana-writer', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
-    ['sakana-writer-mini', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-writer-mini', { m: 'fugu-max', tone: 'default', search: false, think: true, rp: false }],
     ['sakana-polite', { m: 'sakana-namazu', tone: 'jp-vibes', search: false, think: true, rp: false }],
     ['sakana-osaka', { m: 'sakana-namazu', tone: 'osaka', search: false, think: true, rp: false }],
     // legacy v0.14 aliases resolve to the closest profile
@@ -41,12 +41,12 @@ console.log('== 1b. hyphen model matrix parsing (8 public + legacy aliases) ==')
     ['sakana-namazu-search', { m: 'sakana-namazu', tone: 'default', search: true, think: true, rp: false }],
     ['sakana-namazu-osaka', { m: 'sakana-namazu', tone: 'osaka', search: false, think: true, rp: false }],
     ['sakana-namazu-nosearch', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
-    ['sakana-fugu', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
-    ['sakana-fugu-polite-search', { m: 'fugu', tone: 'jp-vibes', search: true, think: true, rp: false }],
-    ['sakana-fugu-osaka', { m: 'fugu', tone: 'osaka', search: false, think: true, rp: false }],
+    ['sakana-fugu', { m: 'fugu-max', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-fugu-polite-search', { m: 'fugu-max', tone: 'jp-vibes', search: true, think: true, rp: false }],
+    ['sakana-fugu-osaka', { m: 'fugu-max', tone: 'osaka', search: false, think: true, rp: false }],
     // code/writer families keep legacy suffix composition working
-    ['sakana-code-mini-search', { m: 'fugu', tone: 'default', search: true, think: true, rp: false }],
-    ['sakana-writer-mini', { m: 'fugu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-code-mini-search', { m: 'fugu-max', tone: 'default', search: true, think: true, rp: false }],
+    ['sakana-writer-mini', { m: 'fugu-max', tone: 'default', search: false, think: true, rp: false }],
   ];
   for (const [model, want] of cases) {
     const r = parseModel(model);

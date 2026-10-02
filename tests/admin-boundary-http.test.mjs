@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -12,6 +13,16 @@ const BUSINESS_KEY = 'business-key';
 const ADMIN_KEY = 'admin-key';
 const port = 24000 + Math.floor(Math.random() * 10000);
 const base = `http://127.0.0.1:${port}`;
+
+// Fake upstream for /api/v2/user/settings (account-import probe).
+const fakeUpstreamPort = 24000 + Math.floor(Math.random() * 10000);
+let fakeUpstreamStatus = 200;
+const fakeUpstream = http.createServer((req, res) => {
+  res.writeHead(fakeUpstreamStatus, { 'content-type': 'application/json' });
+  res.end(fakeUpstreamStatus === 200 ? '{"ok":true}' : '{"errorCode":"AUTH-LOGIN-001"}');
+});
+await new Promise((resolve) => fakeUpstream.listen(fakeUpstreamPort, '127.0.0.1', resolve));
+const SAKANA_BASE = `http://127.0.0.1:${fakeUpstreamPort}`;
 
 const SENSITIVE = Object.freeze({
   cookieHeader: 'cookie-header-http-boundary-sentinel',
@@ -149,6 +160,7 @@ try {
       API_KEY: BUSINESS_KEY,
       ADMIN_API_KEY: ADMIN_KEY,
       SAKANA_COOKIE: 'fake-cookie=fake',
+      SAKANA_BASE,
       SAKANA_SESSION_FILE: sessionFile,
       SAKANA_ACCOUNT_POOL_FILE: poolFile,
       SAKANA_KEYS_FILE: keysFile,
@@ -254,8 +266,50 @@ try {
   assert.equal(Object.hasOwn(safeAccount, 'idToken'), false);
   assert.equal(Object.hasOwn(safeAccount, 'refreshToken'), false);
 
+  // ---- /api/accounts/import (2026-10 seeding path) ----
+  {
+    const denied = await request('/api/accounts/import', {
+      key: BUSINESS_KEY, method: 'POST', body: { cookieHeader: 'sakana-chat=x' },
+    });
+    assert.equal(denied.response.status, 403, 'import is admin-only');
+
+    const invalid = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: 'other=1' },
+    });
+    assert.equal(invalid.response.status, 400, 'import requires a sakana-chat cookie');
+    assert.equal(invalid.json?.error?.code, 'INVALID-SESSION');
+
+    const noSakana = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: {},
+    });
+    assert.equal(noSakana.response.status, 400);
+
+    fakeUpstreamStatus = 401;
+    const rejected = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: 'sakana-chat=imported-cookie-value' },
+    });
+    assert.equal(rejected.response.status, 400, 'import rejects sessions the upstream refuses');
+    assert.equal(rejected.json?.error?.code, 'SESSION-REJECTED');
+
+    fakeUpstreamStatus = 200;
+    const imported = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: 'sakana-chat=imported-cookie-value; cf_clearance=cf' },
+    });
+    assert.equal(imported.response.status, 200, 'valid session imports');
+    assert.equal(imported.json?.ok, true);
+    assert.equal(imported.json?.poolSize, 2, 'pool grows to seeded account + boundary account');
+    assert.equal(Object.hasOwn(imported.json, 'cookieHeader'), false, 'import response never echoes cookies');
+
+    const afterImport = await request('/api/accounts', { key: ADMIN_KEY });
+    const importedEntry = afterImport.json.accounts.find((a) => a.email === '' && a.uid === '');
+    assert.ok(importedEntry, 'imported account (anonymous metadata) appears in admin projection');
+    assert.equal(importedEntry.cookieCount, 2, 'imported cookies counted');
+    assert.equal(Object.hasOwn(importedEntry, 'cookieHeader'), false);
+  }
+
   console.log('admin boundary HTTP tests: all passed');
 } finally {
   await stopChild();
+  fakeUpstream.close();
   await fs.promises.rm(tempDir, { recursive: true, force: true });
 }

@@ -372,6 +372,8 @@ sakana-2api/
 | `GEMINI_DEFAULT_MODEL` | `sakana` | Gemini 端点模型名兜底映射 |
 | `DEBUG_PROMPT` | unset | 设为 `1` 时记录受限长度的 prompt 调试摘要；默认不记录正文 |
 | `SAKANA_NATIVE` | auto | `0` 强制 JS 热点实现；默认自动加载已构建的 Rust 模块（`npm run build:native`，未构建时走 JS fallback，无功能差异） |
+| `SAKANA_MINI_UPSTREAM` | `fugu-max` | mini 档位映射的上游模型名（2026-10 客户端注册表中 `fugu` 已被 `fugu-max` 取代；上游再改名时用此项热修） |
+| `TURNSTILE_GATE_TIMEOUT_MS` | `90000` | 等待 Cloudflare Turnstile 交互挑战放行的上限（2026-10 新增的会话闸门） |
 | `SAKANA_BASE` | `https://chat.sakana.ai` | 上游地址(测试用) |
 
 **鉴权模式(三态):**
@@ -389,6 +391,13 @@ sakana-2api/
 
 ## ⚠️ 注意事项
 
+- **⚠️ 注册政策变化(2026-10 实测)**: 上游新增 Cloudflare Turnstile 会话闸门,并**封锁一次性邮箱注册**——Firebase 登录成功后 `POST /api/auth/login` 返回 `403 AUTH-EMAIL-001`,随后账号被标记 `USER_DISABLED`;匿名会话引导同样被拒("Connection failed")。自动 harvest 暂时无法创建新账号。**给池子补号的路径**:在自己浏览器登录 chat.sakana.ai 后,把 `sakana-chat` cookie 通过管理接口导入:
+  ```bash
+  curl -X POST http://host:8787/api/accounts/import \
+    -H "Authorization: Bearer <API_KEY>" -H "content-type: application/json" \
+    -d '{"cookieHeader":"sakana-chat=<值>; 其他cookie=..."}'
+  ```
+  导入会先经上游 `/api/v2/user/settings` 验证,拒绝无效会话;导入后的会话由 `refreshAccount` 自动续期。
 - **账号池与注册**: 默认使用一个 persistent browser context 串行执行登录、刷新和补池，避免身份互相覆盖。设置 `HARVEST_CONCURRENCY=2` 或 `3` 才启用有界独立临时 context；停止服务时会取消并关闭这些 context。浏览器、cookie 和 Firebase token 只保留在服务端。
 - **手动模式**: `AUTO_SESSION=false` 时不启动浏览器、不补池、不刷新旧 account pool，
   只从 `SAKANA_SESSION_FILE` 读取一个显式会话。
