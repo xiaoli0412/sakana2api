@@ -13,6 +13,7 @@ const models = [
   { id: 'sakana-code-mini', description: 'Sakana Code Mini · 编程轻量 · 工具强化 · 先搜后想' },
   { id: 'sakana-writer', description: 'Sakana Writer · 超长文本写作 · 上下文压缩管线' },
   { id: 'sakana-writer-mini', description: 'Sakana Writer Mini · 写作轻量 · 上下文压缩管线' },
+  { id: 'sakana-translate', description: 'Sakana Translate · 大批量翻译 · 格式保真 · 术语一致' },
   { id: 'sakana-polite', description: 'Sakana Polite · 敬语风格 · 深度思考' },
   { id: 'sakana-osaka', description: 'Sakana Osaka · Osaka 风格 · 深度思考' },
   { id: 'sakana-namazu-rp2', description: 'legacy roleplay model' },
@@ -86,7 +87,7 @@ try {
     badgeRemoved: !document.getElementById('chatModelBadge'),
     styleSelect: !!document.getElementById('chatStyleSelect'),
   }));
-  if (!initial.noRemoteFonts || initial.panes < 8 || initial.tabs < 8 || initial.options !== 8 || initial.hasRpOption) throw new Error(`unexpected initial UI: ${JSON.stringify(initial)}`);
+  if (!initial.noRemoteFonts || initial.panes < 8 || initial.tabs < 8 || initial.options !== 9 || initial.hasRpOption) throw new Error(`unexpected initial UI: ${JSON.stringify(initial)}`);
   if (!initial.togglesRemoved || !initial.badgeRemoved || !initial.styleSelect) throw new Error(`composer cleanup failed: ${JSON.stringify(initial)}`);
 
   await page.click('#btnOpenSidebar');
@@ -162,7 +163,7 @@ try {
 
   await page.click('#btnOpenSidebar');
   await page.click('[data-tab="models"]');
-  if (await page.locator('#modelMatrixGrid .model-card').count() !== 8) throw new Error('model matrix does not show the 8 standard models');
+  if (await page.locator('#modelMatrixGrid .model-card').count() !== 9) throw new Error('model matrix does not show the 9 standard models');
 
   const chat = await page.evaluate(() => {
     const sessions = Array.from({ length: 25 }, (_, i) => ({ id: `s${i}`, title: `session ${i}`, messages: Array.from({ length: 20 }, () => ({ role: 'user', content: 'x'.repeat(5000), files: [{ name: 'x.png', type: 'image/png', dataUrl: 'data:image/png;base64,' + 'A'.repeat(2000) }] })) }));

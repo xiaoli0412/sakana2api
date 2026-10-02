@@ -2065,7 +2065,7 @@ for chunk in response:
             支持标准流式（SSE）与非流式调用，支持思考链（reasoning_content）、多模态图片、文本附件、联网搜索以及多轮对话自动上下文粘性绑定。
           </p>
           <div class="json-viewer mono">{
-    "model": "sakana", // 可选: sakana, sakana-mini, sakana-code, sakana-code-mini, sakana-writer, sakana-writer-mini, sakana-polite, sakana-osaka
+    "model": "sakana", // 可选: sakana, sakana-mini, sakana-code, sakana-code-mini, sakana-writer, sakana-writer-mini, sakana-translate, sakana-polite, sakana-osaka
   "messages": [
     { "role": "system", "content": "You are a helpful assistant." },
     { "role": "user", "content": "帮我写一首关于海洋的诗" }
@@ -2363,7 +2363,7 @@ function switchTab(tab) {
     chat: ['Sakana Chat', '多模态对话与长上下文'],
     accounts: ['账号池管理', '上游会话池与自动保活'],
     keys: ['API 密钥管理', 'Bearer 令牌生成与应用分发'],
-    models: ['模型矩阵', '8 个标准模型，搜索与思考智能路由'],
+    models: ['模型矩阵', '9 个标准模型，搜索与思考智能路由'],
     audit: ['请求审计日志', '仅保留请求与响应元数据'],
     docs: ['API 接入文档', 'OpenAI / Anthropic 兼容接口标准'],
     settings: ['系统配置', '端点与运行时诊断'],
@@ -3728,8 +3728,9 @@ function renderModelMatrix() {
     const isMini = m.id.includes('mini');
     const isCode = m.id.includes('code');
     const isWriter = m.id.includes('writer');
-    const tag = isCode ? '⌨️ Code' : isWriter ? '✍️ Writer' : isMini ? '🐡 Mini' : '🐟 Namazu';
-    const tagClass = isCode ? 'info' : isWriter ? 'on' : isMini ? 'blue' : 'on';
+    const isTranslate = m.id.includes('translate');
+    const tag = isTranslate ? '🌐 Translate' : isCode ? '⌨️ Code' : isWriter ? '✍️ Writer' : isMini ? '🐡 Mini' : '🐟 Namazu';
+    const tagClass = isTranslate ? 'blue' : isCode ? 'info' : isWriter ? 'on' : isMini ? 'blue' : 'on';
     card.innerHTML = `
       <div>
         <div class="model-card-head">

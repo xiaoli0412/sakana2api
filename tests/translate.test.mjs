@@ -54,7 +54,7 @@ console.log('== 1b. hyphen model matrix parsing (8 public + legacy aliases) ==')
     check(`parse ${model}`, JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got));
   }
   check('RP models removed from /v1/models', !MODELS.some((m) => m.id.includes('-rp')));
-  check('total models = 8', MODELS.length === 8, String(MODELS.length));
+  check('total models = 9', MODELS.length === 9, String(MODELS.length));
   check('code profile flagged on sakana-code', parseModel('sakana-code').profile.family === 'code');
   check('writer profile flagged on sakana-writer', parseModel('sakana-writer').profile.family === 'writer');
   check('legacy namazu maps to standard profile', parseModel('sakana-namazu').profile.id === 'sakana');
@@ -354,6 +354,20 @@ console.log('== 13c. system prompt and RP injection ==');
   check('writer protocol injected', writerProfile.prompt.startsWith('[写作模式协议'), writerProfile.prompt.slice(0, 40));
   const plainProfile = openaiRequestToSakana({ model: 'sakana', messages: [{ role: 'user', content: 'hi' }] });
   check('standard profile has no extra protocol', !plainProfile.prompt.includes('模式协议'), plainProfile.prompt.slice(0, 40));
+
+  // 13d. translate profile: protocol + fast-mode routing + tool-hint skip
+  const trProfile = openaiRequestToSakana({ model: 'sakana-translate', messages: [{ role: 'user', content: 'Hello world' }] });
+  check('translate protocol injected', trProfile.prompt.startsWith('[翻译模式协议'), trProfile.prompt.slice(0, 40));
+  check('translate default target zh-CN', trProfile.prompt.includes('「zh-CN」'), trProfile.prompt.slice(0, 80));
+  check('translate route: thinking off', trProfile.sakanaReq?.enableThinking === false || trProfile.enableThinking === false);
+  check('translate route: search off', !(trProfile.sakanaReq?.webSearchEnabled ?? trProfile.webSearchEnabled));
+  check('translate route: no search chain', !trProfile.route?.chainSearch);
+  const trTools = openaiRequestToSakana({ model: 'sakana-translate', messages: [{ role: 'user', content: 'hi' }], tools: [{ type: 'function', function: { name: 'get_weather', parameters: {} } }] });
+  check('translate skips tool hint injection', !trTools.prompt.includes('工具调用协议'), trTools.prompt.slice(0, 60));
+  check('translate client tool names still tracked', trTools.clientToolNames?.includes('get_weather'));
+  const trTarget = openaiRequestToSakana({ model: 'sakana-translate', target_lang: '日本語', messages: [{ role: 'user', content: 'hi' }] });
+  check('translate target_lang param honored', trTarget.prompt.includes('「日本語」'));
+  check('translate profile flagged', parseModel('sakana-translate').profile.family === 'translate');
 }
 
 console.log('== 14. Least-InFlight load balancing & account pool ==');

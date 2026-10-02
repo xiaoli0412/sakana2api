@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
-const { MODELS, openaiRequestToSakana, normalizedMessagesToPrompt, assertStandardModel, NdjsonTranslator, sse, clean, stripChips, extractFileContent, buildSearchChainPrompt, renderChainSources, mergeCitations } = require('./lib/translate');
+const { MODELS, openaiRequestToSakana, normalizedMessagesToPrompt, assertStandardModel, NdjsonTranslator, sse, clean, stripChips, extractFileContent, buildSearchChainPrompt, renderChainSources, mergeCitations, citationsToAnnotations } = require('./lib/translate');
 const { anthropicToChat, chatToAnthropicNonStream, AnthropicStreamer } = require('./lib/anthropic');
 const { SakanaUpstream, UpstreamError, closeGlobalDispatcher, probeSession } = require('./lib/upstream');
 const { getSession, loadSession, setReloadHandler, SESSION_FILE } = require('./lib/session');
@@ -367,6 +367,34 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
+/**
+ * Backpressure-aware SSE writer. res.write() returning false means the TCP
+ * buffer is full; without awaiting drain, a slow client plus a fast upstream
+ * piles every chunk into Node's internal queue (unbounded memory under load).
+ * Producers `await writer.write(...)` so generation paces against the client,
+ * and `writer.flush()` before res.end() guarantees ordering.
+ */
+function createSSEWriter(res) {
+  let tail = Promise.resolve();
+  let closed;
+  const closedPromise = new Promise((resolve) => { closed = resolve; });
+  res.once('close', closed);
+  const write = (payload) => {
+    const text = typeof payload === 'string' ? payload : sse(payload.event, payload.data);
+    const run = tail.then(() => new Promise((resolve) => {
+      if (res.writableEnded || res.destroyed || res.socket?.destroyed) return resolve();
+      const ok = res.write(text);
+      if (ok) return resolve();
+      const onDrain = () => resolve();
+      res.once('drain', onDrain);
+      closedPromise.then(onDrain);
+    }));
+    tail = run;
+    return run;
+  };
+  return { write, flush: () => tail };
+}
+
 function isRpModelError(error) {
   return String(error?.errorCode || error?.code || '') === 'RP-MODEL-DISABLED';
 }
@@ -653,9 +681,9 @@ async function drainUpstreamRound(resp, translator, onChunk, signal) {
     const decoder = new TextDecoder();
     let buf = '';
     const agg = { content: '', reasoning: '', toolCalls: [] };
-    const absorb = (chunks) => {
+    const absorb = async (chunks) => {
       for (const c of chunks) {
-        if (onChunk) onChunk(c);
+        if (onChunk) await onChunk(c);
         const d = c.choices[0] && c.choices[0].delta;
         if (!d) continue;
         if (d.content) agg.content += d.content;
@@ -670,9 +698,9 @@ async function drainUpstreamRound(resp, translator, onChunk, signal) {
       if (done) { buf += decoder.decode(); break; }
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split('\n'); buf = lines.pop();
-      for (const line of lines) { if (line.trim()) absorb(translator.line(line)); }
+      for (const line of lines) { if (line.trim()) await absorb(translator.line(line)); }
     }
-    if (buf.trim()) absorb(translator.line(buf));
+    if (buf.trim()) await absorb(translator.line(buf));
     return { t: translator, ...agg };
   } finally {
     signal?.removeEventListener?.('abort', onAbort);
@@ -1306,6 +1334,9 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       const mergedCitations = mergeCitations(chainCitations, t.citations);
       if (mergedCitations.length) {
         response.citations = mergedCitations;
+        // OpenAI-style annotations projection for clients that read sources
+        // from `annotations` rather than the custom `citations` field.
+        response.annotations = citationsToAnnotations(mergedCitations);
       }
       stats.finish({ stream: false, ok: true, model: modelName, promptChars, completionChars: text.length, keyId: req.keyId });
       const finalLeaf = await finalizeContext(body, normalized, conversationId, lastMessageId, req, contextSnapshot, signal);
@@ -1322,14 +1353,15 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     const base = { id: t.assistantMessageId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: modelName };
     let streamError = null;
     let streamErrCode = null;
+    const writer = createSSEWriter(res);
     try {
-      const onChunk = (c) => {
+      const onChunk = async (c) => {
         const d = c.choices[0] && c.choices[0].delta;
         if (d && d.content) streamedChars += d.content.length;
-        res.write(sse('chat.completion.chunk', { ...base, choices: c.choices }));
+        await writer.write({ event: 'chat.completion.chunk', data: { ...base, choices: c.choices } });
       };
       if (chainReasoning) {
-        res.write(sse('chat.completion.chunk', { ...base, choices: [{ index: 0, delta: { reasoning_content: chainReasoning }, finish_reason: null }] }));
+        await writer.write({ event: 'chat.completion.chunk', data: { ...base, choices: [{ index: 0, delta: { reasoning_content: chainReasoning }, finish_reason: null }] } });
       }
       await drainUpstreamRound(upResp, t, onChunk, signal);
       // Native tool round with no text: continue transparently (same as the
@@ -1363,9 +1395,12 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
         t.citations = mergeCitations(chainCitations, t.citations);
         for (const c of t.finish()) {
           const chunkData = { ...base, choices: c.choices };
-          if (c.citations && c.citations.length) chunkData.citations = c.citations;
+          if (c.citations && c.citations.length) {
+            chunkData.citations = c.citations;
+            chunkData.annotations = citationsToAnnotations(c.citations);
+          }
           if (c.usage) chunkData.usage = c.usage;
-          res.write(sse('chat.completion.chunk', chunkData));
+          await writer.write({ event: 'chat.completion.chunk', data: chunkData });
         }
       }
     } catch (e) {
@@ -1376,11 +1411,12 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
       const canceled = streamErrCode === 'REQUEST-ABORTED' || streamErrCode === 'REQUEST-TIMEOUT' || streamErrCode === 'SERVER-SHUTDOWN';
       if (!canceled) {
         const fb = { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'error' }], error: { message: safeErrorDetail({ code: streamErrCode }), type: 'upstream_error', code: streamErrCode } };
-        try { res.write(sse('chat.completion.chunk', fb)); } catch {}
+        try { await writer.write({ event: 'chat.completion.chunk', data: fb }); } catch {}
       }
     }
     try {
-      if (!signal?.aborted) res.write('data: [DONE]\n\n');
+      if (!signal?.aborted) await writer.write('data: [DONE]\n\n');
+      await writer.flush();
       res.end();
     } catch {}
     const ok = !streamError;
@@ -1422,7 +1458,9 @@ async function handleLegacyCompletions(req, res) {
   if (!reader) return;
   if (stream) {
     sseHeaders(res);
-    for await (const c of reader) res.write(sse(c.event || 'chat.completion.chunk', c.data));
+    const writer = createSSEWriter(res);
+    for await (const c of reader) await writer.write({ event: c.event || 'chat.completion.chunk', data: c.data });
+    await writer.flush();
     if (!req.__signal?.aborted) return res.end('data: [DONE]\n\n');
     return res.end();
   }
@@ -1466,13 +1504,15 @@ async function handleResponses(req, res) {
   if (stream) {
     // Emit OpenAI response-format chunks (response.output_text.delta) for compat.
     sseHeaders(res);
+    const writer = createSSEWriter(res);
     for await (const c of reader) {
       if (c.event === 'chat.completion.chunk') {
         const d = c.data?.choices?.[0]?.delta?.content;
-        if (d) res.write(sse('response.output_text.delta', { type: 'response.output_text.delta', delta: d, item_id: 'msg_' + randomUUID().slice(0, 6) }));
-        if (c.data?.choices?.[0]?.finish_reason) res.write(sse('response.completed', { type: 'response.completed', response: { id: 'resp_' + randomUUID().slice(0, 6), status: 'completed', output: [] } }));
+        if (d) await writer.write({ event: 'response.output_text.delta', data: { type: 'response.output_text.delta', delta: d, item_id: 'msg_' + randomUUID().slice(0, 6) } });
+        if (c.data?.choices?.[0]?.finish_reason) await writer.write({ event: 'response.completed', data: { type: 'response.completed', response: { id: 'resp_' + randomUUID().slice(0, 6), status: 'completed', output: [] } } });
       }
     }
+    await writer.flush();
     if (!req.__signal?.aborted) return res.end('data: [DONE]\n\n');
     return res.end();
   }
@@ -1510,18 +1550,20 @@ async function handleAnthropicMessages(req, res) {
   if (stream) {
     sseHeaders(res);
     const streamer = new AnthropicStreamer({ model: chatBody.model || 'sakana' });
-    res.write(`data: ${JSON.stringify(streamer.start())}\n\n`);
+    const writer = createSSEWriter(res);
+    await writer.write(`data: ${JSON.stringify(streamer.start())}\n\n`);
     for await (const c of reader) {
       if (c.event === 'chat.completion.chunk') {
-        for (const ev of streamer.push(c.data)) res.write(`data: ${JSON.stringify(ev)}\n\n`);
+        for (const ev of streamer.push(c.data)) await writer.write(`data: ${JSON.stringify(ev)}\n\n`);
       }
     }
     // 上游提前终止时补合规收尾事件
     if (!streamer.stopped) {
       for (const ev of streamer.push({ choices: [{ index: 0, delta: {}, finish_reason: 'end_turn' }] })) {
-        res.write(`data: ${JSON.stringify(ev)}\n\n`);
+        await writer.write(`data: ${JSON.stringify(ev)}\n\n`);
       }
     }
+    await writer.flush();
     if (!req.__signal?.aborted) return res.end('data: [DONE]\n\n');
     return res.end();
   }

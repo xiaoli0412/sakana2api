@@ -278,7 +278,7 @@ console.log('== 8. 响应适配器:OpenAI 管线输出 -> Gemini 协议 ==');
 console.log('== 9. Gemini 模型列表 ==');
 {
   const list = geminiModelList();
-  check('models 数组', Array.isArray(list.models) && list.models.length === 8);
+  check('models 数组', Array.isArray(list.models) && list.models.length === 9);
   check('RP models omitted', list.models.every((m) => !m.name.includes('-rp')));
   check('name 前缀 models/', list.models.every((m) => m.name.startsWith('models/')));
   check('支持 generateContent', list.models.every((m) => m.supportedGenerationMethods.includes('streamGenerateContent')));

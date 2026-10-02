@@ -153,7 +153,7 @@ for chunk in resp:
 
 ### `GET /v1/models`
 
-8 个公开模型（标准 / code / writer profile，full / mini 分层；旧模型名仅作为隐藏兼容别名）:
+9 个公开模型（标准 / code / writer / translate profile，full / mini 分层；旧模型名仅作为隐藏兼容别名）:
 
 | 模型 ID | 说明 |
 |---------|------|
@@ -165,6 +165,17 @@ for chunk in resp:
 | `sakana-writer-mini` | 写作轻量 · 上下文压缩管线 |
 | `sakana-polite` | 敬语风格 · 深度思考 |
 | `sakana-osaka` | Osaka 风格 · 深度思考 |
+| `sakana-translate` | 大批量翻译 · 格式保真 · 术语一致 |
+
+翻译模型专为大批量翻译设计（上游 /translate 页面单次限 2,000 字符，代理无此限制，超长文档自动走附件管线）。用法：
+
+```bash
+curl http://host:8787/v1/chat/completions -H "content-type: application/json"   -d '{"model":"sakana-translate","messages":[{"role":"user","content":"<任意长度原文>"}],"target_lang":"日语"}'
+```
+
+- `target_lang`（默认 `zh-CN`）与 `source_lang`（默认 `auto`）为扩展参数
+- 只输出译文：Markdown 结构/段落编号/代码块/URL 逐项保真（真实上游实测 5/5）
+- 思考与搜索自动关闭，工具提示不注入——纯快速吞吐模式
 
 > 标准模型默认深度思考；code/writer 默认先搜索再思考。上游搜索与思考互斥，代理会自动分成两轮并合并来源。
 > 旧冒号风格格式仍兼容，但建议使用 `style` 参数。旧版 `-rp`/`:rp` 模型已下线；请求会稳定返回 `400 RP-MODEL-DISABLED`,不会创建上游会话。

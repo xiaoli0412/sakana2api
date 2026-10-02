@@ -35,7 +35,7 @@ PATCH/DELETE /api/v2/conversations/{id} (改名/删除)
 ## 3. 模型与路由
 
 公开模型固定为 8 个：`sakana`、`sakana-mini`、`sakana-code`、`sakana-code-mini`、
-`sakana-writer`、`sakana-writer-mini`、`sakana-polite`、`sakana-osaka`。旧的 Namazu/Fugu
+`sakana-writer`、`sakana-writer-mini`、`sakana-translate`、`sakana-polite`、`sakana-osaka`。旧的 Namazu/Fugu
 模型名只作为隐藏兼容别名，不会出现在模型列表；任何包含 `rp`、`roleplay` 或
 `role-play` 的名称都会在映射前返回 `RP-MODEL-DISABLED`。
 
@@ -130,7 +130,9 @@ toolResult.output = { query, formattedResults, sources: [{ title, url, content? 
 - 思考:`reasoning` update 增量;内容含 `<thinking>...</thinking> <plan>...</plan> <answer>...</answer>` 标记。
 - 风格 toneMode:默认 `default`;公开风格模型为 `sakana`、`sakana-polite`、`sakana-osaka`，也可通过 `style` 参数覆盖。
 - 公开模型固定为 8 个 profile：`sakana`、`sakana-mini`、`sakana-code`、`sakana-code-mini`、
-  `sakana-writer`、`sakana-writer-mini`、`sakana-polite`、`sakana-osaka`。
+  `sakana-writer`、`sakana-writer-mini`、`sakana-translate`、`sakana-polite`、`sakana-osaka`。
+- translate 档:思考与搜索强制关闭(纯快速模式),`target_lang`/`source_lang` 扩展参数注入翻译协议,
+  不注入工具提示;上游 2026-10 新增 `/translate` 页面(单次 2,000 字符限制,`/translate/api/*` 需登录)。
   full 档映射上游 `sakana-namazu`，mini 档映射上游 `fugu-max`（2026-10 客户端注册表实证，`fugu` 单名已从 bundle 消失；可用 `SAKANA_MINI_UPSTREAM` 热修）；旧 Namazu/Fugu 名称仅作兼容别名。
 
 ## 6b. 2026-10 上游变化（实测）
