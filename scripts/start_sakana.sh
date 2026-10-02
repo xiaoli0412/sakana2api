@@ -6,6 +6,9 @@
 # or create keys from the panel after first start.
 cd /root/sakana-2api
 export DISPLAY=:99
+# Runtime env (YYDS_API_KEY, SAKANA_MAIL_PROVIDER, YYDS_DOMAIN, …) lives in
+# the state-only runtime dir and survives deploys; keep secrets out of git.
+[[ -f ./runtime/env.sh ]] && source ./runtime/env.sh
 export HOST="${HOST:-127.0.0.1}"
 if [[ "$HOST" != "127.0.0.1" && "$HOST" != "localhost" && "$HOST" != "::1" && -z "${API_KEY:-}" ]]; then
   echo "API_KEY is required when HOST is publicly reachable" >&2

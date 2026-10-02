@@ -1,6 +1,6 @@
 {
   "name": "sakana-2api",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "private": true,
   "description": "OpenAI-compatible reverse proxy for the free chat.sakana.ai web chat (streaming, thinking, tools, web search, multimodal).",
   "main": "server.js",
@@ -21,6 +21,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "patchright": "^1.63.0",
     "playwright": "^1.62.1",
     "undici": "7.16.0"
   }

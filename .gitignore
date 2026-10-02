@@ -96,3 +96,4 @@ native/index.node
 # deployment admin key (local only)
 scripts/.admin_key
 scripts/provision_and_deploy.py
+scripts/.yyds_secret.json
