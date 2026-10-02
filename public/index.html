@@ -1600,7 +1600,7 @@
       <button class="mobile-menu-btn" id="btnOpenSidebar" type="button" aria-label="打开导航" title="打开导航">☰</button>
       <div class="topbar-title">
         <span id="pageHeaderTitle">仪表盘</span>
-        <span class="badge-tag" id="serverEnvTag">Sakana v0.17.0</span>
+        <span class="badge-tag" id="serverEnvTag">Sakana v0.18.0</span>
       </div>
       <div class="topbar-subtitle" id="pageHeaderSub">欢迎，Admin · 更新于 2026年8月16日 21:00</div>
     </div>
@@ -2210,7 +2210,7 @@ const $ = id => document.getElementById(id);
 
 const THEME_STORAGE_KEY = 'sakana_theme';
 function readStoredTheme() {
-  try { return localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark'; } catch { return 'dark'; }
+  try { return localStorage.getItem(THEME_STORAGE_KEY) === 'dark' ? 'dark' : 'light'; } catch { return 'light'; }
 }
 function applyTheme(theme, persist = true) {
   const light = theme === 'light';
