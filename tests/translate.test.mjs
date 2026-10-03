@@ -29,7 +29,7 @@ console.log('== 1b. hyphen model matrix parsing (8 public + legacy aliases) ==')
     // 8 public profiles
     ['sakana', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
     ['sakana-mini', { m: 'fugu-max', tone: 'default', search: false, think: true, rp: false }],
-    ['sakana-code', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
+    ['sakana-code', { m: 'fugu-max', tone: 'default', search: false, think: true, rp: false }],
     ['sakana-code-mini', { m: 'fugu-max', tone: 'default', search: false, think: true, rp: false }],
     ['sakana-writer', { m: 'sakana-namazu', tone: 'default', search: false, think: true, rp: false }],
     ['sakana-writer-mini', { m: 'fugu-max', tone: 'default', search: false, think: true, rp: false }],

@@ -9,6 +9,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { MODELS, openaiRequestToSakana, normalizedMessagesToPrompt, assertStandardModel, NdjsonTranslator, sse, clean, stripChips, extractFileContent, buildSearchChainPrompt, renderChainSources, mergeCitations, citationsToAnnotations } = require('./lib/translate');
 const { anthropicToChat, chatToAnthropicNonStream, AnthropicStreamer } = require('./lib/anthropic');
 const { SakanaUpstream, UpstreamError, closeGlobalDispatcher, probeSession } = require('./lib/upstream');
+const mailConfig = require('./lib/mail-config');
 const { getSession, loadSession, setReloadHandler, SESSION_FILE } = require('./lib/session');
 const { autoSession } = require('./lib/auto-session');
 const { Stats, KeyStore } = require('./lib/stats');
@@ -85,10 +86,35 @@ const upstream = new SakanaUpstream(() => {
 // built-in web UI (read per-request so edits apply live)
 const UI_HTML_PATH = path.join(__dirname, 'public', 'index.html');
 
-// ---- request/response audit log (in-memory headers-only ring buffer) ----
+// ---- request/response audit log (headers-only ring buffer, persisted) ----
 const AUDIT_MAX = 500;
 const AUDIT_HEADER_VALUE_MAX = 256;
 const auditLog = [];
+// Audit entries survive restarts/deployments: persisted (debounced) into the
+// runtime dir, which deploy_v2 keeps outside the release dirs.
+const AUDIT_FILE = process.env.SAKANA_AUDIT_FILE || path.join(__dirname, 'runtime', 'audit-log.json');
+let auditDirty = false;
+function loadAuditLog() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(AUDIT_FILE, 'utf8'));
+    if (Array.isArray(raw)) for (const e of raw.slice(0, AUDIT_MAX)) auditLog.push(e);
+  } catch {}
+}
+function persistAuditLog() {
+  if (!auditDirty) return;
+  auditDirty = false;
+  try {
+    let target = AUDIT_FILE;
+    try { if (fs.lstatSync(target).isSymbolicLink()) target = fs.realpathSync(target); } catch {}
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const tmp = `${target}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(auditLog.slice(0, AUDIT_MAX)));
+    fs.renameSync(tmp, target);
+  } catch {}
+}
+loadAuditLog();
+const auditFlushTimer = setInterval(persistAuditLog, 5000);
+auditFlushTimer.unref?.();
 const REQUEST_AUDIT_HEADERS = new Set([
   'content-type', 'accept', 'content-length', 'user-agent', 'x-request-id',
   'x-conversation-id', 'x-thread-id', 'x-target-model',
@@ -269,6 +295,7 @@ function auditEntry(req, body, status, _response, error, duration, options = {})
   if (req && typeof req === 'object') req.__auditEntry = entry;
   auditLog.unshift(entry);
   if (auditLog.length > AUDIT_MAX) auditLog.length = AUDIT_MAX;
+  auditDirty = true;
   return entry;
 }
 
@@ -2202,6 +2229,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/api/audit/clear') {
       if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
       auditLog.length = 0;
+      auditDirty = true;
+      persistAuditLog();
       return sendJson(res, 200, { ok: true });
     }
 
@@ -2309,6 +2338,78 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, stats: cache.stats() });
     }
 
+    // Mail provider config (YYDS / mailtm) — panel-configurable, runtime-effective.
+    if (p === '/api/mail-config') {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
+      if (req.method === 'GET') {
+        const saved = mailConfig.readMailConfig();
+        const provider = saved.provider || process.env.SAKANA_MAIL_PROVIDER || (process.env.YYDS_API_KEY ? 'yyds' : 'mailtm');
+        const key = saved.apiKey || process.env.YYDS_API_KEY || '';
+        return sendJson(res, 200, {
+          provider,
+          apiBase: saved.apiBase || process.env.YYDS_API_BASE || 'https://maliapi.215.im/v1',
+          domain: saved.domain || process.env.YYDS_DOMAIN || '',
+          hasKey: !!key,
+          keyPreview: key ? key.slice(0, 10) + '…' : null,
+        });
+      }
+      if (req.method === 'POST') {
+        let b;
+        try { b = JSON.parse((await readBody(req)).toString('utf8')); }
+        catch (e) {
+          if (req.__signal?.aborted) throw e;
+          return sendJson(res, 400, { error: { message: 'invalid JSON' } });
+        }
+        const provider = String(b?.provider || '').toLowerCase();
+        if (!['yyds', 'mailtm'].includes(provider)) {
+          return sendJson(res, 400, { error: { message: 'provider must be yyds or mailtm' } });
+        }
+        const saved = mailConfig.readMailConfig();
+        const next = {
+          provider,
+          apiKey: b.apiKey ? String(b.apiKey) : (saved.apiKey || process.env.YYDS_API_KEY || ''),
+          apiBase: b.apiBase ? String(b.apiBase) : (saved.apiBase || process.env.YYDS_API_BASE || 'https://maliapi.215.im/v1'),
+          domain: b.domain !== undefined ? String(b.domain) : (saved.domain || process.env.YYDS_DOMAIN || ''),
+        };
+        if (provider === 'yyds' && !next.apiKey) {
+          return sendJson(res, 400, { error: { message: 'YYDS provider requires an API key (AC-…)' } });
+        }
+        let verified = false;
+        if (provider === 'yyds' && next.apiKey) {
+          try {
+            const r = await fetch(next.apiBase + '/me', {
+              headers: { 'X-API-Key': next.apiKey },
+              signal: AbortSignal.timeout(15000),
+            });
+            verified = r.ok;
+          } catch {}
+        }
+        mailConfig.saveMailConfig(next);
+        console.log(`[mail-config] provider=${provider} domain=${next.domain || '(rotate)'} verified=${verified}`);
+        return sendJson(res, 200, { ok: true, verified, provider: next.provider, domain: next.domain });
+      }
+      return sendJson(res, 405, { error: { message: 'method not allowed' } });
+    }
+    if (req.method === 'POST' && p === '/api/mail-config/test') {
+      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
+      const provider = process.env.SAKANA_MAIL_PROVIDER || (process.env.YYDS_API_KEY ? 'yyds' : 'mailtm');
+      if (provider !== 'yyds') return sendJson(res, 200, { ok: provider === 'mailtm', detail: provider === 'mailtm' ? 'mail.tm 无需 key(域名大概率已被上游封禁)' : 'provider not yyds' });
+      if (!process.env.YYDS_API_KEY) return sendJson(res, 400, { error: { message: 'YYDS_API_KEY not configured' } });
+      try {
+        const apiBase = process.env.YYDS_API_BASE || 'https://maliapi.215.im/v1';
+        const r = await fetch(apiBase + '/me', {
+          headers: { 'X-API-Key': process.env.YYDS_API_KEY },
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!r.ok) return sendJson(res, 200, { ok: false, message: `上游返回 HTTP ${r.status}` });
+        const me = await r.json().catch(() => ({}));
+        const user = me?.data?.username || me?.username || 'ok';
+        return sendJson(res, 200, { ok: true, detail: `YYDS 连接正常 (${user})` });
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, message: 'network error' });
+      }
+    }
+
     // Character card management
     if (p.startsWith('/api/characters')) {
       // The avatar is served publicly before the auth gate (see above).
@@ -2391,6 +2492,8 @@ function abortActiveRequests(reason = 'server is shutting down') {
 }
 
 async function closeRuntime() {
+  clearInterval(auditFlushTimer);
+  persistAuditLog();
   if (runtimeClosed) return;
   runtimeClosed = true;
   abortActiveRequests();
@@ -2445,6 +2548,9 @@ server.listen(PORT, HOST, async () => {
   if (runtimeClosed) return;
   console.log(`sakana-2api listening on http://${HOST}:${PORT}`);
   console.log(`models: ${MODELS.length}`);
+  // Panel-configured mail provider (runtime/mail-config.json) — survives
+  // deploys, applied to process.env before any harvest happens.
+  mailConfig.loadMailConfig();
 
   if (AUTO_SESSION) {
     setReloadHandler(() => autoSession.refreshSessionLocked());

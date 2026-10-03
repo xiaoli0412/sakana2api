@@ -58,6 +58,7 @@ const server = createServer((req, res) => {
   else if (url.pathname === '/api/accounts') body(200, { accounts: [], total: 0, active: 0, target: 0, max: 0 });
   else if (url.pathname === '/api/keys') body(200, { keys: [], open: true });
   else if (url.pathname === '/api/audit') body(200, { entries: audit });
+  else if (url.pathname === '/api/mail-config') body(200, { provider: 'yyds', apiBase: 'https://maliapi.215.im/v1', domain: '', hasKey: true, keyPreview: 'AC-…' });
   else body(404, { error: { message: 'not found' } });
 });
 
