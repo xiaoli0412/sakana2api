@@ -6,7 +6,11 @@
 import { performance } from 'node:perf_hooks';
 
 const BASE = process.env.SAKANA_TEST_BASE || 'http://186.241.74.77:8787';
-const KEY = process.env.SAKANA_TEST_KEY || 'sk-sak-9ebc4a52053fe974455bdae17e25a2405d12e871e5b991fd';
+const KEY = process.env.SAKANA_TEST_KEY || '';
+if (!KEY) {
+  console.error('verify: SAKANA_TEST_KEY is required (never hardcode keys)');
+  process.exit(1);
+}
 
 const bigSchema = Array.from({ length: 25 }, (_, i) => ({
   type: 'function',
