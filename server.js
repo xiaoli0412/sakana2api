@@ -392,7 +392,20 @@ function createSSEWriter(res) {
     tail = run;
     return run;
   };
-  return { write, flush: () => tail };
+  // SSE heartbeat: `: ping` comments keep proxies/clients from timing out and
+  // make the stream feel alive during the slow phases (queue wait, upstream
+  // bootstrap, search round, thinking warm-up) that precede the first token.
+  let heartbeat = null;
+  const pingEvery = (ms, signal) => {
+    clearInterval(heartbeat);
+    heartbeat = setInterval(() => {
+      if (res.writableEnded || res.destroyed || res.socket?.destroyed) { clearInterval(heartbeat); return; }
+      res.write(': ping\n\n');
+    }, Math.max(1000, ms));
+    if (signal) signal.addEventListener('abort', () => clearInterval(heartbeat), { once: true });
+    return () => clearInterval(heartbeat);
+  };
+  return { write, flush: () => tail, pingEvery, stopHeartbeat: () => clearInterval(heartbeat) };
 }
 
 function isRpModelError(error) {
@@ -723,8 +736,13 @@ async function continueNativeToolRound(conversationId, sakanaReq, signal) {
  * Smart-routing round 1 for code/writer profiles: a search-only collection
  * pass on the same conversation. Returns bounded sources for the thinking
  * round; the caller falls back to single-round on any failure.
+ * Time-bounded (SAKANA_SEARCH_TIMEOUT_MS, default 60s): a hung search must
+ * never stall the whole response — the thinking round proceeds without sources.
  */
-async function runSearchChainRound(conversationId, sakanaReq, { lastMessageId, signal }) {  const searchReq = {
+async function runSearchChainRound(conversationId, sakanaReq, { lastMessageId, signal }) {
+  const searchTimeoutMs = Math.max(5000, parseInt(process.env.SAKANA_SEARCH_TIMEOUT_MS || '60000', 10));
+  const searchSignal = AbortSignal.any([signal, AbortSignal.timeout(searchTimeoutMs)].filter(Boolean));
+  const searchReq = {
     ...sakanaReq,
     prompt: buildSearchChainPrompt(sakanaReq),
     files: [],
@@ -737,8 +755,8 @@ async function runSearchChainRound(conversationId, sakanaReq, { lastMessageId, s
     route: { ...(sakanaReq.route || {}), chainSearch: false },
   };
   const t = new NdjsonTranslator({ declaredTools: [] });
-  const resp = await upstream.streamGenerate(conversationId, searchReq, { lastMessageId, signal });
-  const drained = await drainUpstreamRound(resp, t, undefined, signal);
+  const resp = await upstream.streamGenerate(conversationId, searchReq, { lastMessageId, signal: searchSignal });
+  const drained = await drainUpstreamRound(resp, t, undefined, searchSignal);
   return { citations: t.citations || [], reasoning: drained.reasoning || '', note: renderChainSources(t.citations) };
 }
 
@@ -1354,6 +1372,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     let streamError = null;
     let streamErrCode = null;
     const writer = createSSEWriter(res);
+    writer.pingEvery(parseInt(process.env.SSE_HEARTBEAT_MS || '15000', 10), req.__signal);
     try {
       const onChunk = async (c) => {
         const d = c.choices[0] && c.choices[0].delta;
@@ -1417,6 +1436,7 @@ async function handleChatInner(req, res, body, start, ctxEntry) {
     try {
       if (!signal?.aborted) await writer.write('data: [DONE]\n\n');
       await writer.flush();
+    writer.stopHeartbeat();
       res.end();
     } catch {}
     const ok = !streamError;
@@ -1459,8 +1479,10 @@ async function handleLegacyCompletions(req, res) {
   if (stream) {
     sseHeaders(res);
     const writer = createSSEWriter(res);
+    writer.pingEvery(parseInt(process.env.SSE_HEARTBEAT_MS || '15000', 10), req.__signal);
     for await (const c of reader) await writer.write({ event: c.event || 'chat.completion.chunk', data: c.data });
     await writer.flush();
+    writer.stopHeartbeat();
     if (!req.__signal?.aborted) return res.end('data: [DONE]\n\n');
     return res.end();
   }
@@ -1505,6 +1527,7 @@ async function handleResponses(req, res) {
     // Emit OpenAI response-format chunks (response.output_text.delta) for compat.
     sseHeaders(res);
     const writer = createSSEWriter(res);
+    writer.pingEvery(parseInt(process.env.SSE_HEARTBEAT_MS || '15000', 10), req.__signal);
     for await (const c of reader) {
       if (c.event === 'chat.completion.chunk') {
         const d = c.data?.choices?.[0]?.delta?.content;
@@ -1513,6 +1536,7 @@ async function handleResponses(req, res) {
       }
     }
     await writer.flush();
+    writer.stopHeartbeat();
     if (!req.__signal?.aborted) return res.end('data: [DONE]\n\n');
     return res.end();
   }
@@ -1551,6 +1575,7 @@ async function handleAnthropicMessages(req, res) {
     sseHeaders(res);
     const streamer = new AnthropicStreamer({ model: chatBody.model || 'sakana' });
     const writer = createSSEWriter(res);
+    writer.pingEvery(parseInt(process.env.SSE_HEARTBEAT_MS || '15000', 10), req.__signal);
     await writer.write(`data: ${JSON.stringify(streamer.start())}\n\n`);
     for await (const c of reader) {
       if (c.event === 'chat.completion.chunk') {
@@ -1564,6 +1589,7 @@ async function handleAnthropicMessages(req, res) {
       }
     }
     await writer.flush();
+    writer.stopHeartbeat();
     if (!req.__signal?.aborted) return res.end('data: [DONE]\n\n');
     return res.end();
   }
