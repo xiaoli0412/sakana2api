@@ -891,18 +891,20 @@ tr:hover td { background: var(--card-soft); }
           <div style="display:flex;flex-direction:column;gap:9px">
             <select class="input-text mono" id="mailProviderSelect">
               <option value="yyds">YYDS (maliapi.215.im · 自定义域名)</option>
+              <option value="cloudflare">Cloudflare Worker (自有域名邮箱)</option>
               <option value="mailtm">mail.tm (公共域名 · 大概率已被封)</option>
             </select>
             <input type="password" class="input-text mono" id="mailApiKeyInput" placeholder="YYDS API Key (AC- 开头)" autocomplete="off">
             <input type="text" class="input-text mono" id="mailDomainInput" placeholder="私有域名 (留空则社区域名轮换)" autocomplete="off">
             <input type="text" class="input-text mono" id="mailApiBaseInput" placeholder="API Base (默认 https://maliapi.215.im/v1)" autocomplete="off">
+            <input type="text" class="input-text mono" id="browserProxyInput" placeholder="补号浏览器代理 (留空跟随 HTTP_PROXY 环境变量)" autocomplete="off">
             <div style="display:flex;gap:8px;align-items:center">
               <button class="btn sm primary" id="btnSaveMailConfig">保存并生效</button>
               <button class="btn sm" id="btnTestMailConfig">测试连接</button>
               <span style="font-size:11.5px;color:var(--text-dim)" id="mailConfigHint"></span>
             </div>
             <div style="font-size:10.5px;color:var(--text-muted);line-height:1.7;border-top:1px solid var(--line);padding-top:8px">
-              保存即时生效并持久化到 runtime/mail-config.json。无有效供应商时可用 <code>/api/accounts/import</code> 导入人工会话。
+              保存即时生效并持久化到 runtime/mail-config.json。无有效供应商时可用 <code>/api/accounts/import</code> 导入人工会话。浏览器代理在下一次补号启动浏览器时生效；邮箱 Worker 始终直连（挂代理会被 403）。
             </div>
           </div>
         </div>
@@ -2892,6 +2894,14 @@ $('settingBaseUrl').value = `${location.origin}/v1`;
 
 
 // Mail provider configuration (panel-saved, runtime-effective)
+function syncMailProviderFields() {
+  const p = $('mailProviderSelect')?.value || 'yyds';
+  const isCf = p === 'cloudflare';
+  if ($('mailApiKeyInput')) $('mailApiKeyInput').placeholder = isCf ? 'CF API Key (可空)' : 'YYDS API Key (AC- 开头)';
+  if ($('mailDomainInput')) $('mailDomainInput').placeholder = isCf ? '邮箱域名 (如 mihoyo.click)' : '私有域名 (留空则社区域名轮换)';
+  if ($('mailApiBaseInput')) $('mailApiBaseInput').placeholder = isCf ? 'Worker API Base (如 https://apimail.mihoyo.click)' : 'API Base (默认 https://maliapi.215.im/v1)';
+}
+$('mailProviderSelect')?.addEventListener('change', syncMailProviderFields);
 async function loadMailConfigUi() {
   try {
     const res = await apiFetch('/api/mail-config');
@@ -2899,7 +2909,9 @@ async function loadMailConfigUi() {
     const cfg = await res.json();
     const el = $('mailProviderStatus');
     if (el) {
-      if (cfg.provider === 'yyds' && cfg.hasKey) {
+      if (cfg.provider === 'cloudflare') {
+        el.textContent = cfg.cfDomain ? `Cloudflare Worker 已配置 · 域名 ${cfg.cfDomain}` : 'Cloudflare Worker 已配置';
+      } else if (cfg.provider === 'yyds' && cfg.hasKey) {
         el.textContent = cfg.domain ? `YYDS 已配置 · 域名 ${cfg.domain}` : 'YYDS 已配置 · 社区域名轮换';
       } else if (cfg.provider === 'mailtm') {
         el.textContent = 'mail.tm (公共域名,大概率被封)';
@@ -2908,24 +2920,37 @@ async function loadMailConfigUi() {
       }
     }
     if ($('mailProviderSelect')) $('mailProviderSelect').value = cfg.provider || 'yyds';
-    if ($('mailApiBaseInput')) $('mailApiBaseInput').value = cfg.apiBase || '';
-    if ($('mailDomainInput')) $('mailDomainInput').value = cfg.domain || '';
-    if ($('mailApiKeyInput')) $('mailApiKeyInput').placeholder = cfg.hasKey ? (cfg.keyPreview || '已保存 (重新输入以更换)') : 'AC-xxxxxxxxxxxxxxxx';
+    syncMailProviderFields();
+    if ($('mailApiBaseInput')) $('mailApiBaseInput').value = (cfg.provider === 'cloudflare' ? cfg.cfBase : cfg.apiBase) || '';
+    if ($('mailDomainInput')) $('mailDomainInput').value = (cfg.provider === 'cloudflare' ? cfg.cfDomain : cfg.domain) || '';
+    if ($('browserProxyInput')) $('browserProxyInput').value = cfg.browserProxy || '';
+    if ($('mailApiKeyInput')) $('mailApiKeyInput').placeholder = (cfg.hasKey || cfg.cfHasKey) ? (cfg.keyPreview || '已保存 (重新输入以更换)') : ($('mailProviderSelect')?.value === 'cloudflare' ? 'CF API Key (可空)' : 'AC-xxxxxxxxxxxxxxxx');
   } catch {}
 }
 $('btnSaveMailConfig')?.addEventListener('click', async () => {
   const hint = $('mailConfigHint');
   const keyVal = $('mailApiKeyInput')?.value.trim() || '';
+  const provider = $('mailProviderSelect')?.value || 'yyds';
+  const baseVal = $('mailApiBaseInput')?.value.trim() || '';
+  const domainVal = $('mailDomainInput')?.value.trim() || '';
+  const payload = {
+    provider,
+    browserProxy: $('browserProxyInput')?.value.trim() ?? '',
+  };
+  if (provider === 'cloudflare') {
+    payload.cfBase = baseVal || undefined;
+    payload.cfDomain = domainVal;
+    payload.cfApiKey = keyVal || undefined;
+  } else {
+    payload.apiKey = keyVal || undefined;
+    payload.apiBase = baseVal || undefined;
+    payload.domain = domainVal;
+  }
   try {
     const res = await apiFetch('/api/mail-config', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        provider: $('mailProviderSelect')?.value || 'yyds',
-        apiKey: keyVal || undefined,
-        apiBase: $('mailApiBaseInput')?.value.trim() || undefined,
-        domain: $('mailDomainInput')?.value.trim() || '',
-      }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);

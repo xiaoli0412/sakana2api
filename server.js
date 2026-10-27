@@ -155,6 +155,23 @@ function isPublicHttpUrl(value) {
   try { safeRemoteUrl(value); return true; } catch { return false; }
 }
 
+// Harvest browser proxy is consumed by Chromium, not by our SSRF-guarded
+// fetchers, so loopback proxies (127.0.0.1:7897) are legitimate here. Accept a
+// scheme-qualified http/https/socks URL or a bare host:port, and nothing that
+// could smuggle Chromium arguments.
+function isBrowserProxy(value) {
+  const raw = String(value || '').trim();
+  if (!raw || /[\s'"]/.test(raw)) return false;
+  if (/^[a-z0-9+.-]+:\/\//i.test(raw)) {
+    let url;
+    try { url = new URL(raw); } catch { return false; }
+    if (!['http:', 'https:', 'socks:', 'socks4:', 'socks5:'].includes(url.protocol)) return false;
+    return !!url.hostname && (!url.pathname || url.pathname === '/');
+  }
+  const m = raw.match(/^([^\s/:]+):(\d{1,5})$/);
+  return !!m && Number(m[2]) > 0 && Number(m[2]) <= 65535;
+}
+
 function stableErrorCode(error, status = 500) {
   const raw = String(error?.errorCode || error?.code || '').toUpperCase();
   if (raw === 'RP-MODEL-DISABLED' || raw === 'EMPTY-RESPONSE' || raw === 'SERVER-BUSY') return raw;
@@ -2109,6 +2126,12 @@ const server = http.createServer(async (req, res) => {
           domain: saved.domain || process.env.YYDS_DOMAIN || '',
           hasKey: !!key,
           keyPreview: key ? key.slice(0, 10) + '…' : null,
+          // Cloudflare Worker provider fields + harvest browser proxy
+          cfBase: saved.cfBase || process.env.CF_MAIL_BASE || '',
+          cfDomain: saved.cfDomain || process.env.CF_MAIL_DOMAIN || '',
+          cfHasKey: !!(saved.cfApiKey || process.env.CF_MAIL_API_KEY),
+          browserProxy: saved.browserProxy !== undefined ? saved.browserProxy
+            : (process.env.SAKANA_BROWSER_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || ''),
         });
       }
       if (req.method === 'POST') {
@@ -2119,8 +2142,8 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 400, { error: { message: 'invalid JSON' } });
         }
         const provider = String(b?.provider || '').toLowerCase();
-        if (!['yyds', 'mailtm'].includes(provider)) {
-          return sendJson(res, 400, { error: { message: 'provider must be yyds or mailtm' } });
+        if (!['yyds', 'mailtm', 'cloudflare'].includes(provider)) {
+          return sendJson(res, 400, { error: { message: 'provider must be yyds, mailtm or cloudflare' } });
         }
         const saved = mailConfig.readMailConfig();
         const next = {
@@ -2128,12 +2151,27 @@ const server = http.createServer(async (req, res) => {
           apiKey: b.apiKey ? String(b.apiKey) : (saved.apiKey || process.env.YYDS_API_KEY || ''),
           apiBase: b.apiBase ? String(b.apiBase) : (saved.apiBase || process.env.YYDS_API_BASE || 'https://maliapi.215.im/v1'),
           domain: b.domain !== undefined ? String(b.domain) : (saved.domain || process.env.YYDS_DOMAIN || ''),
+          cfBase: b.cfBase ? String(b.cfBase).replace(/\/+$/, '') : (saved.cfBase || process.env.CF_MAIL_BASE || ''),
+          cfDomain: b.cfDomain !== undefined ? String(b.cfDomain) : (saved.cfDomain || process.env.CF_MAIL_DOMAIN || ''),
+          cfApiKey: b.cfApiKey ? String(b.cfApiKey) : (saved.cfApiKey || process.env.CF_MAIL_API_KEY || ''),
+          browserProxy: b.browserProxy !== undefined ? String(b.browserProxy) : (saved.browserProxy || ''),
         };
         if (provider === 'yyds' && !next.apiKey) {
           return sendJson(res, 400, { error: { message: 'YYDS provider requires an API key (AC-…)' } });
         }
+        if (provider === 'cloudflare' && !next.cfBase) {
+          return sendJson(res, 400, { error: { message: 'cloudflare provider requires a Worker API Base (如 https://apimail.example.com)' } });
+        }
         if (!isPublicHttpUrl(next.apiBase)) {
           return sendJson(res, 400, { error: { message: 'apiBase must be a public http(s) URL' } });
+        }
+        if (next.cfBase && !isPublicHttpUrl(next.cfBase)) {
+          return sendJson(res, 400, { error: { message: 'cfBase must be a public http(s) URL' } });
+        }
+        // The proxy is handed straight to Chromium, so accept only what
+        // Playwright accepts: an http(s)/socks URL, or host:port.
+        if (next.browserProxy && !isBrowserProxy(next.browserProxy)) {
+          return sendJson(res, 400, { error: { message: 'browserProxy must be an http(s)/socks proxy URL or host:port' } });
         }
         let verified = false;
         if (provider === 'yyds' && next.apiKey) {
@@ -2146,16 +2184,54 @@ const server = http.createServer(async (req, res) => {
             });
           } catch {}
           verified = !!result?.ok;
+        } else if (provider === 'cloudflare') {
+          // Prove the full path works by creating a disposable mailbox; the
+          // worker must be reached DIRECTLY (it 403s through a proxy), so this
+          // intentionally uses the global no-proxy dispatcher.
+          try {
+            const probe = await fetchRemoteJson(next.cfBase + '/api/new_address', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', ...(next.cfApiKey ? { 'x-custom-auth': next.cfApiKey, 'x-api-key': next.cfApiKey } : {}) },
+              body: JSON.stringify(next.cfDomain ? { name: 'probe' + Date.now().toString(36), domain: next.cfDomain } : { name: 'probe' + Date.now().toString(36) }),
+              signal: req.__signal,
+              maxBytes: 256 * 1024,
+            });
+            verified = !!(probe?.ok && (probe.body?.address));
+          } catch {}
         }
         mailConfig.saveMailConfig(next);
-        console.log(`[mail-config] provider=${provider} domain=${next.domain || '(rotate)'} verified=${verified}`);
-        return sendJson(res, 200, { ok: true, verified, provider: next.provider, domain: next.domain });
+        console.log(`[mail-config] provider=${provider} domain=${next.domain || next.cfDomain || '(rotate)'} proxy=${next.browserProxy || '(env/direct)'} verified=${verified}`);
+        return sendJson(res, 200, { ok: true, verified, provider: next.provider, domain: next.domain || next.cfDomain });
       }
       return sendJson(res, 405, { error: { message: 'method not allowed' } });
     }
     if (req.method === 'POST' && p === '/api/mail-config/test') {
       if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
       const provider = process.env.SAKANA_MAIL_PROVIDER || (process.env.YYDS_API_KEY ? 'yyds' : 'mailtm');
+      if (provider === 'cloudflare') {
+        const cfBase = (process.env.CF_MAIL_BASE || '').replace(/\/+$/, '');
+        if (!cfBase) return sendJson(res, 400, { error: { message: 'CF_MAIL_BASE not configured' } });
+        if (!isPublicHttpUrl(cfBase)) return sendJson(res, 400, { error: { message: 'CF_MAIL_BASE must be a public http(s) URL' } });
+        try {
+          const headers = { 'content-type': 'application/json', origin: cfBase, referer: cfBase + '/' };
+          if (process.env.CF_MAIL_API_KEY) {
+            headers['x-custom-auth'] = process.env.CF_MAIL_API_KEY;
+            headers['x-api-key'] = process.env.CF_MAIL_API_KEY;
+          }
+          const result = await fetchRemoteJson(cfBase + '/api/new_address', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(process.env.CF_MAIL_DOMAIN ? { name: 'probe' + Date.now().toString(36), domain: process.env.CF_MAIL_DOMAIN } : { name: 'probe' + Date.now().toString(36) }),
+            signal: AbortSignal.any([req.__signal, AbortSignal.timeout(15000)].filter(Boolean)),
+            maxBytes: 256 * 1024,
+          });
+          const addr = result.body && result.body.address;
+          if (!result.ok || !addr) return sendJson(res, 200, { ok: false, message: `worker 返回 HTTP ${result.status}` });
+          return sendJson(res, 200, { ok: true, detail: `Cloudflare Worker 正常 · 测试邮箱 ${addr}` });
+        } catch (e) {
+          return sendJson(res, 200, { ok: false, message: 'network error（注意：邮箱 Worker 必须直连，不能挂代理）' });
+        }
+      }
       if (provider !== 'yyds') return sendJson(res, 200, { ok: provider === 'mailtm', detail: provider === 'mailtm' ? 'mail.tm 无需 key(域名大概率已被上游封禁)' : 'provider not yyds' });
       if (!process.env.YYDS_API_KEY) return sendJson(res, 400, { error: { message: 'YYDS_API_KEY not configured' } });
       try {

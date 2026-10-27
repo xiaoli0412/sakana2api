@@ -390,6 +390,19 @@ sakana-2api/
 | `TURNSTILE_GATE_TIMEOUT_MS` | `90000` | 等待 Cloudflare Turnstile 交互挑战放行的上限（2026-10 新增的会话闸门） |
 | `SAKANA_BASE` | `https://chat.sakana.ai` | 上游地址(测试用) |
 
+**临时邮箱供应商:** `SAKANA_MAIL_PROVIDER` 取值 `yyds`(默认,有 `YYDS_API_KEY` 时)/`mailtm`/`cloudflare`。`cloudflare` 用于自建 [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) 风格的 Worker 邮箱(自有域名,不受公共临时邮箱域名封禁影响):
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `SAKANA_MAIL_PROVIDER` | `yyds`/`mailtm` | `cloudflare` 启用自建 Worker 邮箱 |
+| `CF_MAIL_BASE` | – | Worker 根地址(如 `https://apimail.example.com`),必须公网可达;**必须直连**,挂代理会被 Worker 403 |
+| `CF_MAIL_DOMAIN` | Worker 默认 | 收信域名;留空则用 Worker 侧配置 |
+| `CF_MAIL_PREFIX` | `sak` | 邮箱名前缀 |
+| `CF_MAIL_API_KEY` | – | Worker 的 `PASSWORDS` 访问密码(可空);同时作为 `x-custom-auth` 与 `x-api-key` 发送 |
+| `SAKANA_BROWSER_PROXY` | – | 补号浏览器专用代理(如 `http://127.0.0.1:7897`);留空回退 `HTTPS_PROXY`/`HTTP_PROXY`。只影响浏览器,Node 侧请求仍走直连 dispatcher |
+
+> 以上均可在管理面板「设置 → 邮箱」中配置,保存即时生效并持久化到 `runtime/mail-config.json`。
+
 **鉴权模式(三态):**
 
 | 状态 | 行为 |
