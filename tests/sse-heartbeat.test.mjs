@@ -68,11 +68,18 @@ const child = spawn(process.execPath, ['server.js'], {
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
-child.stdout.resume();
-child.stderr.resume();
+let childLog = '';
+child.stdout.on('data', (c) => { childLog += c; });
+child.stderr.on('data', (c) => { childLog += c; });
 
 try {
-  await delay(1200);
+  // Poll until the child actually listens; a fixed sleep raced slow starts.
+  const readyDeadline = Date.now() + 15000;
+  for (;;) {
+    try { if ((await fetch(base + '/health')).ok) break; } catch {}
+    if (Date.now() > readyDeadline) throw new Error(`server did not start:\n${childLog.slice(-2000)}`);
+    await delay(150);
+  }
 
   // 1) heartbeat frames present in a slow stream
   const resp = await fetch(base + '/v1/chat/completions', {
