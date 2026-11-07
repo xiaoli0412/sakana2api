@@ -291,7 +291,7 @@ RP 模型已全线下线且不可恢复，这是预期行为，请求不会触�
 
 - [README](https://github.com/xiaoli0412/sakana2api#readme) — 功能总览与完整环境变量
 - [Releases](https://github.com/xiaoli0412/sakana2api/releases) — 版本发布与变更
-- [v0.21.0 更新日志](https://github.com/xiaoli0412/sakana2api/blob/main/CHANGELOG.md) — 会话隔离与安全加固明细
+- [更新日志](https://github.com/xiaoli0412/sakana2api/blob/main/CHANGELOG.md) — 版本变更与回归记录
 - [protocol.md](https://github.com/xiaoli0412/sakana2api/blob/main/protocol.md) — 上游协议逆向文档
 
 延伸阅读：[[部署指南]]、[[API 参考]]、[[会话与隔离详解]]、[[账号池运维]]。

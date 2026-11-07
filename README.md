@@ -415,6 +415,23 @@ sakana-2api/
 
 ---
 
+## 🧪 真实测试（联网）
+
+离线门禁用 `npm test`（44 个 node 测试 + 1 个部署测试，串行）。真实链路用：
+
+```bash
+SAKANA_MAIL_PROVIDER=yyds YYDS_API_KEY=... YYDS_API_BASE=... \
+  npm run test:live
+```
+
+它会依次：注册一个全新账号（真实浏览器 + 魔法链接）→ 用该会话启动一个临时代理 → 校验模型列表 → 非流式与流式各发一次真实对话 → 走管理接口导入同一 cookie → 检查账号池投影不泄露 cookie。输出 `LIVE_RESULTS` JSON，全绿退出码 0。
+
+- 复用已有会话（跳过注册）：`SAKANA_E2E_SESSION_FILE=./session.json npm run test:live`
+- 本机若使用 TUN/fake-IP 代理，DNS 会被解析到 198.18/15 并被 SSRF 防护拒绝；仅本地测试可显式钉真实 IP：`SAKANA_E2E_DNS="maliapi.215.im=162.159.130.234"`。生产环境不要设置该变量。
+- 该测试会消耗真实注册与模型额度，不纳入 `npm test`。
+
+---
+
 ## ⚠️ 注意事项
 
 - **⚠️ 注册政策变化(2026-10 实测)**: 上游新增 Cloudflare Turnstile 会话闸门,并**封锁一次性邮箱注册**——Firebase 登录成功后 `POST /api/auth/login` 返回 `403 AUTH-EMAIL-001`,随后账号被标记 `USER_DISABLED`;匿名会话引导同样被拒("Connection failed")。自动 harvest 暂时无法创建新账号。**给池子补号的路径**:在自己浏览器登录 chat.sakana.ai 后,把 `sakana-chat` cookie 通过管理接口导入:

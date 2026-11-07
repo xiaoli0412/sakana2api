@@ -1,3 +1,33 @@
+# v0.21.1
+
+## Registration reliability (2026-11 upstream login change)
+
+- The sign-in dialog now offers **Continue with Google** and **Continue with Apple** above the email form. The automation matched all three Continue buttons and died in Playwright strict mode; the email path now matches the dialog's Continue exactly.
+- Turnstile gate detection no longer mistakes the sign-in modal's backdrop for the bootstrap challenge. The dialog's invisible widget no longer costs ~48 s per attempt.
+- Navigation retries once after a cold-start abort; the Cloudflare shield exits early on blank documents instead of waiting the full 120 s.
+- Measured live: fresh registration **158 s → 24 s**, full registration-to-chat flow 35 s.
+
+## Account import (P1)
+
+- `POST /api/accounts/import` accepts raw Cookie headers, Cookie-Editor / EditThisCookie JSON, Playwright storageState, `cookies.txt`, and structured arrays. CRLF header injection is rejected and non-`sakana.ai` cookies are dropped.
+- Import probes `/api/v2/user/settings` before a cookie can enter the pool. Failures return a structured `reason` (`invalid_session` / `turnstile_challenge` / `rate_limited` / `upstream_error` / `network_error`) and never occupy a pool slot.
+- Optional `/api/rate-limit/status` quota snapshot in `validation`; `GET /api/accounts` exposes per-account validations plus lease pressure. Repeated systemic probe failures trigger a bounded backoff (`429 PROBE-BACKOFF`), tunable via `SAKANA_IMPORT_PROBE_*`.
+- Admin panel: paste box with format detection, validation badges, per-account validation column, and lease statistics.
+
+## Maintainability (P2-P4)
+
+- `server.js` 2452 → 1941 lines: extracted `lib/admin-routes.js`, `lib/http-auth.js`, `lib/public-routes.js`, `lib/http-util.js`.
+- `translate.js` 1220 → 746 lines: extracted `lib/model-profiles.js`, `lib/ndjson-translator.js`, `lib/text-utils.js`; all public re-exports are unchanged.
+- Test groups: `npm run test:core` / `test:http` / `test:native` / `test:deploy`; `npm test` keeps its original sequential command.
+- Wiki: deployment guide, API reference, session isolation, account-pool operations; dead links removed.
+
+## Verification
+
+- `npm test`: 44 node tests + 1 deployment-runtime test, all green (45 steps).
+- `npm run test:live`: 7/7 — fresh registration, 9-model list, non-stream chat, SSE stream, admin import, pool projection without cookie leakage.
+
+---
+
 # v0.21.0
 
 ## Conversation isolation and reliability

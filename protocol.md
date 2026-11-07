@@ -142,6 +142,7 @@ toolResult.output = { query, formattedResults, sources: [{ title, url, content? 
 - **每模型配额端点**: `GET /api/rate-limit/status`(需登录),返回 `{models:[{id,exceeded}]}`;未登录 401 `AUTH-LOGIN-001`。
 - **模型注册表**(bundle 实证): 匿名态 `availableModels` = `sakana-namazu`(multimodal image/*, thinking:false, anonymousAccess:true) + `fugu-max`("Orchestrates diverse models", thinking:false, 匿名不可用);代码另有 `fugu-ultra` 特判分支(登录档位,待实测确认)。文件类型白名单: image/*、application/pdf、text/plain、text/markdown、application/json、docx、csv、xlsx、html、pptx。
 - **账号补充路径**: 自动注册被封锁期间,用管理接口 `POST /api/accounts/import`(body `{cookieHeader}`)导入人工登录获得的会话;导入前先经 `/api/v2/user/settings` 验证。
+- **登录弹窗 2026-11 改版(实测 2026-11-07)**: 邮箱表单上方新增 `Continue with Google` / `Continue with Apple`,邮箱入口保留(以 `OR` 分隔)。自动化按可访问名 `Continue` 会同时命中 3 个按钮并触发 strict mode 报错,必须 exact 匹配;Turnstile 遮罩告警不阻塞邮箱提交。修复后全新注册链路(YYDS 邮箱 → 魔法链接 → `sakana-chat`)实测可用,新会话 `/api/v2/user/settings` 200、`/api/rate-limit/status` 正常。
 
 ## 7. 文件上传
 
