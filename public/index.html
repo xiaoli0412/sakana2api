@@ -792,9 +792,26 @@ tr:hover td { background: var(--card-soft); }
         <button class="btn sm" id="btnRefreshAccounts">↻ 刷新</button>
         <button class="btn sm primary" id="btnTriggerHarvest">＋ 触发补号</button>
       </div>
+      <div class="card-panel" style="margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+          <div class="section-title" style="margin:0">导入人工登录会话</div>
+          <span style="flex:1"></span>
+          <span class="pill info" id="importDetectPill">自动识别: —</span>
+        </div>
+        <div style="font-size:11.5px;color:var(--text-dim);line-height:1.7;margin-bottom:8px">
+          在浏览器登录 chat.sakana.ai 后复制 Cookie。支持原始 Cookie 头、Cookie-Editor / EditThisCookie JSON、Playwright storageState、cookies.txt。导入前会实时校验上游会话:无效会话、Turnstile 拦截、配额耗尽都会在下方标出,校验失败不占池位。
+        </div>
+        <textarea class="input-text mono" id="importCookieInput" rows="4" spellcheck="false"
+          style="width:100%;resize:vertical;min-height:84px;font-family:var(--font-mono);font-size:11.5px"
+          placeholder="sakana-chat=…; cf_clearance=…  (或粘贴 JSON / cookies.txt)"></textarea>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap">
+          <button class="btn sm primary" id="btnImportAccount">校验并导入</button>
+          <span id="importResult" style="font-size:11.5px;color:var(--text-dim)">尚未导入</span>
+        </div>
+      </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>邮箱</th><th>状态</th><th>成功/尝试</th><th>限流至</th><th>最近活动</th><th>操作</th></tr></thead>
+          <thead><tr><th>邮箱</th><th>类型</th><th>并发/成功率</th><th>Cookie</th><th>最近活动</th><th>状态</th><th>校验</th></tr></thead>
           <tbody id="accountRows"></tbody>
         </table>
       </div>
@@ -2680,14 +2697,16 @@ async function refreshAccounts() {
     const harvStatus = json.lastHarvestError
       ? `<span class="pill rate">🛑 ${esc(String(json.lastHarvestError).slice(0, 60))}</span>`
       : '<span class="pill on">✅ 收割正常</span>';
-    $('accPoolStatus').innerHTML = `目标 <b>${target}</b> · 上限 <b>${max}</b> · 最近收割 <b>${lastHarv}</b> · ${harvStatus}`;
+    const leaseCount = json.leaseCount ?? 0, inFlight = json.inFlight ?? 0, stale = json.stale ?? 0;
+    $('accPoolStatus').innerHTML = `目标 <b>${target}</b> · 上限 <b>${max}</b> · 最近收割 <b>${lastHarv}</b> · 租约 <b>${leaseCount}</b> / 并发 <b>${inFlight}</b> / 陈旧 <b>${stale}</b> · ${harvStatus}`;
 
     const tbody = $('accountRows');
     if (!list.length) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-dim)">账号池为空 — 点击右上角「触发账号补充」或等待后台自动 Harvest</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-dim)">账号池为空 — 在上方粘贴 Cookie 导入人工会话，或等待后台自动 Harvest</td></tr>';
       return;
     }
 
+    const validations = json.validations && typeof json.validations === 'object' ? json.validations : {};
     tbody.innerHTML = list.map(a => {
       const statePill = a.state === 'active' ? 'on' : a.state === 'rate_limited' ? 'rate' : 'rev';
       const stateTxt = a.state === 'active' ? '🟢 正常活跃' : a.state === 'rate_limited' ? '⏳ 速率受限' : '🔴 已过期';
@@ -2701,12 +2720,109 @@ async function refreshAccounts() {
           <td class="mono">${(a.cookies || []).length} 个</td>
           <td class="mono">${a.savedAt ? fmtTime(Math.floor((Date.now() - a.savedAt)/1000)) : '—'}</td>
           <td><span class="pill ${statePill}">${stateTxt}</span></td>
-          <td class="mono" style="font-size:11.5px">${fmtDT(a.savedAt)}</td>
+          <td>${accountValidationCell(validations[a.id])}</td>
         </tr>
       `;
     }).join('');
   } catch (e) {
     console.error('refreshAccounts err:', e);
+  }
+}
+
+/** Import-time validation badge for one pool row (never contains credentials). */
+function accountValidationCell(v) {
+  if (!v) return '<span class="pill off">未校验</span>';
+  if (v.status === 'quota_exhausted') {
+    const exceeded = Array.isArray(v.quota?.exceeded) ? v.quota.exceeded : [];
+    const list = exceeded.slice(0, 3).map(esc).join(', ') + (exceeded.length > 3 ? '…' : '');
+    return `<span class="pill rate" title="${esc(list)}">⏳ 配额耗尽</span> <span class="mono" style="font-size:10.5px;color:var(--text-dim)">${esc(list)}</span>`;
+  }
+  if (v.status) {
+    const when = v.checkedAt ? fmtTime(Math.floor((Date.now() - v.checkedAt) / 1000)) + '前' : '';
+    return `<span class="pill on">🟢 活</span> <span class="mono" style="font-size:10.5px;color:var(--text-dim)">${esc(when)}</span>`;
+  }
+  return '<span class="pill off">未校验</span>';
+}
+
+/** Local heuristic only for the "自动识别" hint; the server re-parses authoritatively. */
+function detectCookieFormat(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return 'empty';
+  if (text.startsWith('[') || text.startsWith('{')) return 'json';
+  if (/^#\s*Netscape HTTP Cookie File/i.test(text)) return 'cookies.txt';
+  if (text.includes('\t') && /^[^\t]+\t(?:TRUE|FALSE)\t/mi.test(text)) return 'cookies.txt';
+  if (/^cookie\s*[:：]/i.test(text)) return 'header';
+  return 'header';
+}
+
+const COOKIE_FORMAT_LABELS = {
+  empty: '—', json: 'JSON 导出 (Cookie-Editor / storageState)', 'cookies.txt': 'cookies.txt', header: 'Cookie 头',
+};
+
+function refreshImportDetect() {
+  const pill = $('importDetectPill');
+  if (!pill) return;
+  const format = detectCookieFormat($('importCookieInput')?.value || '');
+  pill.textContent = `自动识别: ${COOKIE_FORMAT_LABELS[format] || format}`;
+  pill.className = format === 'empty' ? 'pill off' : 'pill info';
+}
+
+function importErrorLabel(err) {
+  const code = err?.code || '';
+  const reason = err?.reason || '';
+  if (code === 'PROBE-BACKOFF') return `⏸ 探测退避 (${Math.max(1, Math.ceil((err.retryAfterMs || 0) / 1000))}s)`;
+  if (code === 'SESSION-REJECTED') {
+    if (reason === 'turnstile_challenge') return '🛡 过盾失败 (Turnstile/Cloudflare)';
+    if (reason === 'rate_limited') return '⏳ 上游限流';
+    if (reason === 'upstream_error') return '🛰 上游异常';
+    if (reason === 'network_error' || reason === 'timeout') return '📡 网络失败';
+    return '🔴 死会话 (上游 401)';
+  }
+  if (code === 'DUPLICATE-SESSION') return '↩ 已在池中 / 已隔离';
+  if (code === 'INVALID-SESSION') return '📋 格式或内容无效';
+  return '⚠️ 导入失败';
+}
+
+async function importAccountFromPanel() {
+  const input = $('importCookieInput');
+  const result = $('importResult');
+  const raw = (input?.value || '').trim();
+  if (!raw) {
+    result.innerHTML = '<span class="pill danger">📋 请先粘贴 Cookie</span>';
+    return;
+  }
+  const btn = $('btnImportAccount');
+  btn.disabled = true;
+  result.innerHTML = '<span class="pill info">⏳ 正在校验上游会话…</span>';
+  try {
+    const res = await apiFetch('/api/accounts/import', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cookieHeader: raw }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) {
+      const err = json.error || {};
+      result.innerHTML = `<span class="pill danger">${esc(importErrorLabel(err))}</span> <span style="color:var(--text-dim)">${esc(err.message || '导入失败')}</span>`;
+      return;
+    }
+    const v = json.validation || {};
+    const quota = v.quota || {};
+    const exceeded = Array.isArray(quota.exceeded) ? quota.exceeded : [];
+    const quotaText = exceeded.length
+      ? `配额耗尽: ${exceeded.slice(0, 4).map(esc).join(', ')}${exceeded.length > 4 ? '…' : ''}`
+      : (quota.ok === false ? '配额端点暂不可用' : '配额正常');
+    const okPill = v.status === 'quota_exhausted' ? 'rate' : 'on';
+    const okText = v.status === 'quota_exhausted' ? '🟢 活 · ⏳ 配额耗尽' : '🟢 活 · 配额正常';
+    result.innerHTML = `<span class="pill ${okPill}">${okText}</span> <span style="color:var(--text-dim)">会话已入池 · ${esc(quotaText)} · ${esc(v.cookieCount || 0)} 个 Cookie · 池 ${esc(json.poolSize ?? '—')}</span>`;
+    input.value = '';
+    refreshImportDetect();
+    toast(v.status === 'quota_exhausted' ? '已导入（该会话配额已耗尽）' : '会话校验通过并已入池');
+    refreshAccounts();
+  } catch {
+    result.innerHTML = '<span class="pill danger">📡 请求失败</span> <span style="color:var(--text-dim)">面板与服务的连接中断</span>';
+  } finally {
+    btn.disabled = false;
   }
 }
 $('btnRefreshAccounts').onclick = () => { refreshAccounts(); toast('已刷新账号池'); };
@@ -2719,6 +2835,9 @@ $('btnTriggerHarvest').onclick = async () => {
     } else toast('触发失败', 'err');
   } catch { toast('请求失败', 'err'); }
 };
+$('btnImportAccount').onclick = importAccountFromPanel;
+$('importCookieInput').addEventListener('input', refreshImportDetect);
+refreshImportDetect();
 
 /* ================= TAB 4: API KEYS ================= */
 async function refreshKeys() {

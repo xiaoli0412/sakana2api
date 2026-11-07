@@ -14,11 +14,26 @@ const ADMIN_KEY = 'admin-key';
 const port = 24000 + Math.floor(Math.random() * 10000);
 const base = `http://127.0.0.1:${port}`;
 
-// Fake upstream for /api/v2/user/settings (account-import probe).
+// Fake upstream for /api/v2/user/settings (account-import probe) and
+// /api/rate-limit/status (quota snapshot).
 const fakeUpstreamPort = 24000 + Math.floor(Math.random() * 10000);
 let fakeUpstreamStatus = 200;
+let fakeUpstreamChallenge = false;
+let fakeQuotaExceeded = [];
 const fakeUpstream = http.createServer((req, res) => {
-  res.writeHead(fakeUpstreamStatus, { 'content-type': 'application/json' });
+  if ((req.url || '').startsWith('/api/rate-limit/status')) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      models: [
+        { id: 'sakana-namazu', exceeded: fakeQuotaExceeded.includes('sakana-namazu') },
+        { id: 'fugu-max', exceeded: fakeQuotaExceeded.includes('fugu-max') },
+      ],
+    }));
+    return;
+  }
+  const headers = { 'content-type': fakeUpstreamChallenge ? 'text/html' : 'application/json' };
+  if (fakeUpstreamChallenge) headers['cf-mitigated'] = 'challenge';
+  res.writeHead(fakeUpstreamStatus, headers);
   res.end(fakeUpstreamStatus === 200 ? '{"ok":true}' : '{"errorCode":"AUTH-LOGIN-001"}');
 });
 await new Promise((resolve) => fakeUpstream.listen(fakeUpstreamPort, '127.0.0.1', resolve));
@@ -166,6 +181,12 @@ try {
       SAKANA_KEYS_FILE: keysFile,
       CACHE_ENABLED: 'false',
       SHUTDOWN_DRAIN_MS: '1000',
+      // Small deterministic probe budget so the backoff path is testable
+      // without waiting for the production defaults.
+      SAKANA_IMPORT_PROBE_FAIL_THRESHOLD: '2',
+      SAKANA_IMPORT_PROBE_BACKOFF_MS: '250',
+      SAKANA_IMPORT_PROBE_BACKOFF_MAX_MS: '250',
+      SAKANA_IMPORT_QUOTA_PROBE: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -299,12 +320,112 @@ try {
     assert.equal(imported.json?.ok, true);
     assert.equal(imported.json?.poolSize, 2, 'pool grows to seeded account + boundary account');
     assert.equal(Object.hasOwn(imported.json, 'cookieHeader'), false, 'import response never echoes cookies');
+    assert.equal(imported.json?.validation?.status, 'active', 'live import reports an active session');
+    assert.equal(imported.json?.validation?.format, 'header');
+    assert.equal(imported.json?.validation?.quota?.ok, true, 'quota snapshot is attached');
+    assert.equal(imported.json?.validation?.quota?.exceeded?.length, 0);
 
     const afterImport = await request('/api/accounts', { key: ADMIN_KEY });
     const importedEntry = afterImport.json.accounts.find((a) => a.email === '' && a.uid === '');
     assert.ok(importedEntry, 'imported account (anonymous metadata) appears in admin projection');
     assert.equal(importedEntry.cookieCount, 2, 'imported cookies counted');
     assert.equal(Object.hasOwn(importedEntry, 'cookieHeader'), false);
+    assert.equal(typeof afterImport.json.leaseCount, 'number', 'pool projection exposes lease pressure');
+    assert.equal(typeof afterImport.json.inFlight, 'number');
+    assert.equal(typeof afterImport.json.stale, 'number');
+    const validationRecord = afterImport.json.validations?.[imported.json.id];
+    assert.ok(validationRecord, 'import validation is visible to the panel');
+    assert.equal(validationRecord.status, 'active');
+    assert.equal(JSON.stringify(validationRecord).includes('imported-cookie-value'), false, 'validation never echoes cookies');
+    assert.equal(JSON.stringify(afterImport.json).includes('cookieHeader'), false);
+  }
+
+  // ---- imported-cookie format tolerance + probe classification (P1) ----
+  {
+    // Cookie-Editor / EditThisCookie JSON pasted as one textarea string.
+    const editorJson = JSON.stringify([
+      { domain: '.sakana.ai', name: 'sakana-chat', value: 'editor-json-session-value', path: '/', secure: true },
+      { domain: '.sakana.ai', name: 'cf_clearance', value: 'editor-json-clearance', path: '/' },
+      { domain: '.google.com', name: 'NID', value: 'unrelated-google-cookie', path: '/' },
+    ]);
+    const importedJson = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: editorJson },
+    });
+    assert.equal(importedJson.response.status, 200, 'Cookie-Editor JSON imports');
+    assert.equal(importedJson.json?.validation?.format, 'json');
+    assert.equal(importedJson.json?.validation?.cookieCount, 2, 'non-sakana cookie domains are not stored');
+    assert.equal(importedJson.text.includes('editor-json-session-value'), false, 'JSON import response never echoes cookies');
+
+    // Playwright storageState shape + curl-style "Cookie:" prefix.
+    const storageState = JSON.stringify({
+      cookies: [{ name: 'sakana-chat', value: 'storage-state-session', domain: 'chat.sakana.ai', path: '/' }],
+      origins: [],
+    });
+    const importedState = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: storageState },
+    });
+    assert.equal(importedState.response.status, 200, 'storageState JSON imports');
+    assert.equal(importedState.json?.validation?.cookieCount, 1);
+
+    const prefixed = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: 'Cookie: sakana-chat=prefixed-session; cf_clearance=prefixed-cf' },
+    });
+    assert.equal(prefixed.response.status, 200, 'raw header with Cookie: prefix imports');
+
+    // A header value must never carry CRLF into an upstream request.
+    const injected = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: 'sakana-chat=inject\r\nx-evil: 1' },
+    });
+    assert.equal(injected.response.status, 400, 'CRLF in cookie input is rejected');
+    assert.equal(injected.json?.error?.code, 'INVALID-SESSION');
+    assert.equal(injected.response.headers.get('set-cookie'), null);
+
+    // Quota snapshot makes a live-but-capped session visible at import time.
+    fakeQuotaExceeded = ['fugu-max'];
+    const capped = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: 'sakana-chat=capped-session' },
+    });
+    assert.equal(capped.response.status, 200);
+    assert.equal(capped.json?.validation?.status, 'quota_exhausted');
+    assert.deepEqual(capped.json?.validation?.quota?.exceeded, ['fugu-max']);
+    fakeQuotaExceeded = [];
+
+    // Turnstile challenge: rejected with a reason the panel can label.
+    fakeUpstreamStatus = 403;
+    fakeUpstreamChallenge = true;
+    const beforeChallenge = await request('/api/accounts', { key: ADMIN_KEY });
+    const challenged = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: 'sakana-chat=challenged-session' },
+    });
+    assert.equal(challenged.response.status, 400, 'challenge does not import');
+    assert.equal(challenged.json?.error?.code, 'SESSION-REJECTED', 'legacy error code preserved');
+    assert.equal(challenged.json?.error?.reason, 'turnstile_challenge');
+    assert.equal(challenged.json?.error?.upstreamStatus, 403);
+    assert.equal(challenged.text.includes('challenged-session'), false, 'challenge response never echoes cookies');
+
+    // Second systemic failure trips the probe budget: the next probe backs off
+    // instead of hammering the Turnstile gate again.
+    await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: 'sakana-chat=challenged-session-2' },
+    });
+    const backedOff = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: 'sakana-chat=challenged-session-3' },
+    });
+    assert.equal(backedOff.response.status, 429, 'repeated systemic failures trip the probe backoff');
+    assert.equal(backedOff.json?.error?.code, 'PROBE-BACKOFF');
+    assert.ok(backedOff.json?.error?.retryAfterMs > 0);
+
+    const afterChallenge = await request('/api/accounts', { key: ADMIN_KEY });
+    assert.equal(afterChallenge.json.total, beforeChallenge.json.total, 'rejected sessions never occupy a pool slot');
+
+    await delay(350);
+    fakeUpstreamStatus = 200;
+    fakeUpstreamChallenge = false;
+    const recovered = await request('/api/accounts/import', {
+      key: ADMIN_KEY, method: 'POST', body: { cookieHeader: 'sakana-chat=recovered-session' },
+    });
+    assert.equal(recovered.response.status, 200, 'probe resumes after the backoff window');
+    assert.equal(recovered.json?.validation?.status, 'active');
   }
 
   console.log('admin boundary HTTP tests: all passed');

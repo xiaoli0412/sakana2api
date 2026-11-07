@@ -424,6 +424,9 @@ sakana-2api/
     -d '{"cookieHeader":"sakana-chat=<值>; 其他cookie=..."}'
   ```
   导入会先经上游 `/api/v2/user/settings` 验证,拒绝无效会话;导入后的会话由 `refreshAccount` 自动续期。
+  - **可直接粘贴的格式**:原始 `Cookie` 头(可带 `Cookie:` 前缀)、Cookie-Editor / EditThisCookie JSON 数组、Playwright `storageState` JSON、`cookies.txt` cookie jar。管理面板「账号池 → 导入人工登录会话」会自动识别格式并显示校验结果。
+  - **校验反馈**:成功响应附带 `validation`(`status` = `active` / `quota_exhausted`、`format`、`cookieCount`、`quota.exceeded` 模型列表);失败响应带 `reason`(`invalid_session` / `turnstile_challenge` / `rate_limited` / `upstream_error` / `network_error`)与 `upstreamStatus`。`/api/accounts` 额外返回每个账号最近一次导入校验(`validations`)与租约压力(`leaseCount` / `inFlight` / `stale`)。校验失败的 cookie 不会占用池位。
+  - **探测退避**:连续的系统性探测失败(过盾/限流/5xx/网络)会触发指数退避,避免反复撞 Turnstile 闸门;可用 `SAKANA_IMPORT_PROBE_FAIL_THRESHOLD`、`SAKANA_IMPORT_PROBE_BACKOFF_MS`、`SAKANA_IMPORT_PROBE_MAX_PER_WINDOW` 调整。`SAKANA_IMPORT_QUOTA_PROBE=0` 可关闭导入时的配额快照请求(`GET /api/rate-limit/status`)。
 - **账号池与注册**: 默认使用一个 persistent browser context 串行执行登录、刷新和补池，避免身份互相覆盖。设置 `HARVEST_CONCURRENCY=2` 或 `3` 才启用有界独立临时 context；停止服务时会取消并关闭这些 context。浏览器、cookie 和 Firebase token 只保留在服务端。
 - **手动模式**: `AUTO_SESSION=false` 时不启动浏览器、不补池、不刷新旧 account pool，
   只从 `SAKANA_SESSION_FILE` 读取一个显式会话。

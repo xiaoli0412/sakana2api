@@ -9,7 +9,9 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { MODELS, openaiRequestToSakana, normalizedMessagesToPrompt, assertStandardModel, NdjsonTranslator, sse, clean, stripChips, extractFileContent, buildSearchChainPrompt, renderChainSources, mergeCitations, citationsToAnnotations } = require('./lib/translate');
 const { estimateTokens, estimateRequestTokens } = require('./lib/token-estimate');
 const { anthropicToChat, chatToAnthropicNonStream, AnthropicStreamer } = require('./lib/anthropic');
-const { SakanaUpstream, UpstreamError, closeGlobalDispatcher, probeSession } = require('./lib/upstream');
+const { SakanaUpstream, UpstreamError, closeGlobalDispatcher, probeSession, probeQuota } = require('./lib/upstream');
+const { normalizeImportPayload } = require('./lib/cookie-import');
+const { ImportProbeGuard } = require('./lib/import-probe-guard');
 const mailConfig = require('./lib/mail-config');
 const { getSession, loadSession, setReloadHandler, SESSION_FILE } = require('./lib/session');
 const { autoSession } = require('./lib/auto-session');
@@ -67,6 +69,25 @@ const CONTEXT_COMPACT_THRESHOLD_BYTES = parseInt(process.env.CONTEXT_COMPACT_THR
 // Upstream compaction changes remembered details, so it requires an explicit
 // operator threshold rather than silently summarizing writing/code sessions.
 const WRITER_COMPACT_THRESHOLD_BYTES = parseInt(process.env.WRITER_COMPACT_THRESHOLD_BYTES || '0', 10);
+// Manual account import (2026-10 seeding path): each import runs one liveness
+// probe against /api/v2/user/settings (protocol.md §6b). Knobs are env-tunable
+// because this traffic sits right behind the Turnstile gate and the safe probe
+// cadence can change without a release.
+const IMPORT_PROBE_TIMEOUT_MS = Math.max(1000, parseInt(process.env.SAKANA_IMPORT_PROBE_TIMEOUT_MS || '15000', 10));
+const IMPORT_QUOTA_PROBE = process.env.SAKANA_IMPORT_QUOTA_PROBE !== '0';
+const IMPORT_QUOTA_TIMEOUT_MS = Math.max(1000, parseInt(process.env.SAKANA_IMPORT_QUOTA_TIMEOUT_MS || '10000', 10));
+const importProbeGuard = new ImportProbeGuard();
+// Last known import validation per account id (diagnostic only, never
+// credentials). Bounded so long-lived servers cannot grow it unboundedly.
+const IMPORT_VALIDATION_MAX = 50;
+const importValidations = new Map();
+function recordImportValidation(id, entry) {
+  if (!id) return;
+  importValidations.set(id, entry);
+  while (importValidations.size > IMPORT_VALIDATION_MAX) {
+    importValidations.delete(importValidations.keys().next().value);
+  }
+}
 // Optical second-stage compression (DeepSeek-OCR style): for writer requests
 // whose packaged document exceeds this many bytes, the older portion renders
 // into columnar page images; the recent tail stays as the txt attachment.
@@ -2017,6 +2038,10 @@ const server = http.createServer(async (req, res) => {
       accountPool._checkCooldowns();
       const safe = accountPool.accounts.map(a => accountPool.safeAccount(a));
       const pool = accountPool.snapshot();
+      // Import diagnostics: per-account validation result + live lease pressure.
+      // Additive fields only; the account projection above stays unchanged.
+      const validations = {};
+      for (const [id, entry] of importValidations) validations[id] = entry;
       return sendJson(res, 200, {
         accounts: safe,
         total: pool.total,
@@ -2030,6 +2055,11 @@ const server = http.createServer(async (req, res) => {
         refreshing: pool.refreshing,
         telemetry: pool.telemetry,
         persistenceError: pool.persistenceError || null,
+        leaseCount: pool.leaseCount,
+        inFlight: pool.inFlight,
+        stale: pool.stale,
+        validations,
+        importProbe: importProbeGuard.snapshot(),
       });
     }
 
@@ -2060,50 +2090,79 @@ const server = http.createServer(async (req, res) => {
         if (req.__signal?.aborted) throw e;
         return sendJson(res, 400, { error: { message: 'invalid JSON' } });
       }
-      let cookieHeader = String(b?.cookieHeader || '').trim();
-      if (!cookieHeader && Array.isArray(b?.cookies)) {
-        cookieHeader = b.cookies
-          .filter((c) => c && c.name && c.value)
-          .map((c) => `${c.name}=${c.value}`)
-          .join('; ');
+      // Accepts a raw Cookie header, extension JSON, Playwright storageState,
+      // a cookies.txt jar or a structured cookies array; the pool always gets
+      // one canonical header plus structured cookies for refreshAccount.
+      const normalized = normalizeImportPayload(b);
+      if (!normalized.ok) {
+        return sendJson(res, 400, { error: { message: normalized.message, code: normalized.code } });
       }
-      if (!/(?:^|;\s*)sakana-chat=[^;]+/.test(cookieHeader)) {
-        return sendJson(res, 400, { error: { message: 'cookieHeader must contain a sakana-chat cookie', code: 'INVALID-SESSION' } });
+      const cookieHeader = normalized.cookieHeader;
+
+      // Probe budget: a stale cookie gets one cheap answer, but repeated
+      // challenges/outages pause probing instead of hammering the Turnstile
+      // gate (which would harden the challenge against this egress IP).
+      const ticket = importProbeGuard.begin();
+      if (!ticket.allowed) {
+        const retryAfterMs = ticket.retryAfterMs;
+        return sendJson(res, 429, {
+          error: {
+            message: `account probe temporarily paused after repeated upstream failures — retry in ${Math.max(1, Math.ceil(retryAfterMs / 1000))}s`,
+            code: 'PROBE-BACKOFF',
+            reason: ticket.reason,
+            retryAfterMs,
+          },
+        });
       }
-      const probe = await probeSession(cookieHeader).catch(() => ({ ok: false, status: 0 }));
+      const probe = await probeSession(cookieHeader, { timeoutMs: IMPORT_PROBE_TIMEOUT_MS })
+        .catch(() => ({ ok: false, status: 0, reason: 'network_error' }));
+      importProbeGuard.record({ ok: probe.ok, reason: probe.reason || (probe.ok ? 'ok' : 'network_error') });
       if (!probe.ok) {
         return sendJson(res, 400, {
           error: {
             message: `session cookie rejected by upstream (status ${probe.status}) — sign in at chat.sakana.ai and copy a fresh sakana-chat cookie`,
             code: 'SESSION-REJECTED',
+            reason: probe.reason || 'invalid_session',
+            upstreamStatus: probe.status,
+            retryAfterMs: probe.retryAfterMs || 0,
           },
         });
       }
+      // Quota snapshot (protocol.md §6b): tells the operator whether a live
+      // cookie is already day/week-capped before it occupies a pool slot.
+      // SAKANA_IMPORT_QUOTA_PROBE=0 skips this second upstream request.
+      let quota = null;
+      if (IMPORT_QUOTA_PROBE) {
+        quota = await probeQuota(cookieHeader, { timeoutMs: IMPORT_QUOTA_TIMEOUT_MS }).catch(() => null);
+      }
       const id = accountPool.upsert({
         cookieHeader,
-        // refreshAccount needs structured cookies; synthesize them for a
-        // header-only import so the session can be refreshed later.
-        cookies: Array.isArray(b?.cookies) && b.cookies.length
-          ? b.cookies
-          : cookieHeader.split(/;\s*/).filter(Boolean).map((pair) => {
-              const eq = pair.indexOf('=');
-              return {
-                name: pair.slice(0, eq),
-                value: pair.slice(eq + 1),
-                domain: 'chat.sakana.ai',
-                path: '/',
-              };
-            }),
+        cookies: normalized.cookies,
         savedAt: Date.now(),
         loggedIn: true,
-        uid: String(b?.uid || ''),
-        email: String(b?.email || ''),
+        uid: normalized.uid,
+        email: normalized.email,
       });
       if (!id) {
         return sendJson(res, 409, { error: { message: 'session already in pool or pool entry quarantined', code: 'DUPLICATE-SESSION' } });
       }
-      console.log(`[accounts] imported session cookie via admin (pool size ${accountPool.count()})`);
-      return sendJson(res, 200, { ok: true, id, poolSize: accountPool.count() });
+      const validation = {
+        status: quota && Array.isArray(quota.exceeded) && quota.exceeded.length ? 'quota_exhausted' : 'active',
+        reason: 'ok',
+        checkedAt: Date.now(),
+        upstreamStatus: probe.status,
+        format: normalized.format,
+        cookieCount: normalized.cookieCount,
+        quota: quota ? {
+          ok: !!quota.ok,
+          status: quota.status,
+          models: quota.models || [],
+          exceeded: quota.exceeded || [],
+        } : null,
+      };
+      recordImportValidation(id, validation);
+      console.log(`[accounts] imported session cookie via admin (format ${normalized.format}, pool size ${accountPool.count()})`);
+      return sendJson(res, 200, { ok: true, id, poolSize: accountPool.count(), validation });
     }
 
     // Cache endpoints
