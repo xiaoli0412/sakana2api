@@ -1,3 +1,23 @@
+# v0.21.2
+
+## Blocked datacenter IPs (egress proxy)
+
+- New `SAKANA_UPSTREAM_PROXY`: Node→upstream requests go through an undici `ProxyAgent`, read at call time so it can change without a restart. Use the same egress as `SAKANA_BROWSER_PROXY` so `cf_clearance` stays bound to one IP.
+- New `SAKANA_BROWSER_HEADLESS=1`: forces headless launches for servers without X/Xvfb. Previously the persistent context tried headful first, failed, and delayed startup before falling back to isolated harvest.
+- Verified on a Cloudflare-blocked datacenter IP: direct requests return 403; with mihomo on `127.0.0.1:7992` and both env vars, the browser registered 3 accounts and real chat returned 200.
+
+## Live stress harness
+
+- New `npm run test:stress:live` (`scripts/stress_remote.mjs`): growing full-history turns, 20k-char prompt, 24 KB Markdown attachment, 512×512 image, SSE stream, delta continuation, bounded concurrency burst, per-call latency/tokens plus the server audit tail.
+- Measured on the deployed server: 8-concurrency 20/20 requests, p50 5.0 s / p95 8.2 s; 12-concurrency 24/24, p50 6.0 s / p95 10.1 s; 20k text 8–11 s, 24 KB file 5–6 s, image ~4 s; zero errors, zero queue timeouts.
+
+## Verification
+
+- `npm test`: 44 node tests + 1 deployment-runtime test, all green (45 steps).
+- Live: 3 pooled accounts, peak 8–12 in-flight, `leaseCount` returns to 0, no upstream 403 after the proxy switch.
+
+---
+
 # v0.21.1
 
 ## Registration reliability (2026-11 upstream login change)

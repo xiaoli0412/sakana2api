@@ -401,6 +401,7 @@ sakana-2api/
 | `CF_MAIL_API_KEY` | – | Worker 的 `PASSWORDS` 访问密码(可空);同时作为 `x-custom-auth` 与 `x-api-key` 发送 |
 | `SAKANA_BROWSER_PROXY` | – | 补号浏览器专用代理(如 `http://127.0.0.1:7897`);留空回退 `HTTPS_PROXY`/`HTTP_PROXY`。只影响浏览器,Node 侧请求仍走直连 dispatcher |
 | `SAKANA_UPSTREAM_PROXY` | – | Node→上游请求的 HTTP(S) 代理(undici `ProxyAgent`)。服务器 IP 被 Cloudflare 403 时,让它与 `SAKANA_BROWSER_PROXY` 指向同一个出口,`cf_clearance` 的 IP 才与 Node 请求一致 |
+| `SAKANA_BROWSER_HEADLESS` | – | 设 `1` 时浏览器强制 headless。无 X/Xvfb 的服务器必须开启,否则持久浏览器启动失败、自动补池回退
 
 > 服务器机房 IP 被 Cloudflare 硬 403 时:在服务器本地跑一个 mihomo/clash(仅监听 127.0.0.1),把 `SAKANA_BROWSER_PROXY` 与 `SAKANA_UPSTREAM_PROXY` 都设为该代理;浏览器过盾取得的 `cf_clearance` 绑定同一出口 IP,Node 侧即可复用会话。
 
