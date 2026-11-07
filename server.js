@@ -9,9 +9,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { MODELS, openaiRequestToSakana, normalizedMessagesToPrompt, assertStandardModel, NdjsonTranslator, sse, clean, stripChips, extractFileContent, buildSearchChainPrompt, renderChainSources, mergeCitations, citationsToAnnotations } = require('./lib/translate');
 const { estimateTokens, estimateRequestTokens } = require('./lib/token-estimate');
 const { anthropicToChat, chatToAnthropicNonStream, AnthropicStreamer } = require('./lib/anthropic');
-const { SakanaUpstream, UpstreamError, closeGlobalDispatcher, probeSession, probeQuota } = require('./lib/upstream');
-const { normalizeImportPayload } = require('./lib/cookie-import');
-const { ImportProbeGuard } = require('./lib/import-probe-guard');
+const { SakanaUpstream, UpstreamError, closeGlobalDispatcher } = require('./lib/upstream');
 const mailConfig = require('./lib/mail-config');
 const { getSession, loadSession, setReloadHandler, SESSION_FILE } = require('./lib/session');
 const { autoSession } = require('./lib/auto-session');
@@ -23,12 +21,16 @@ const { ConversationLocks } = require('./lib/conversation-lock');
 const { normalizeRequestBody, AttachmentError } = require('./lib/request-normalizer');
 const { buildNormalizedSakanaRequest, requestedHistoryMode } = require('./lib/request-assembly');
 const { makeContextSnapshot, decideContext } = require('./lib/context-policy');
-const { safeUrl: safeRemoteUrl, fetchRemoteJson } = require('./lib/remote-fetch');
+
 const { abortCode, abortError: makeAbortError } = require('./lib/abort');
+const { sendJson, readBody } = require('./lib/http-util');
+const { createAuth } = require('./lib/http-auth');
+const { createAdminApi } = require('./lib/admin-routes');
+const { createPublicRoutes } = require('./lib/public-routes');
 const { concurrencyManager } = require('./lib/concurrency');
 const { chatResponse } = require('./lib/chat-response');
 const optical = require('./lib/optical-context');
-const { parsePngCard, normalizeCard, saveCard, loadCard, listCards, buildCardSystemText } = require('./lib/character-card');
+const { loadCard, buildCardSystemText } = require('./lib/character-card');
 const { buildRpSystem, resolveRpPreset, resolveRpNsfw, resolveRpLength } = require('./lib/rp-preset');
 const {
   isGeminiBody, geminiRequestToChat, parseGeminiRoute, geminiModelList,
@@ -69,25 +71,6 @@ const CONTEXT_COMPACT_THRESHOLD_BYTES = parseInt(process.env.CONTEXT_COMPACT_THR
 // Upstream compaction changes remembered details, so it requires an explicit
 // operator threshold rather than silently summarizing writing/code sessions.
 const WRITER_COMPACT_THRESHOLD_BYTES = parseInt(process.env.WRITER_COMPACT_THRESHOLD_BYTES || '0', 10);
-// Manual account import (2026-10 seeding path): each import runs one liveness
-// probe against /api/v2/user/settings (protocol.md §6b). Knobs are env-tunable
-// because this traffic sits right behind the Turnstile gate and the safe probe
-// cadence can change without a release.
-const IMPORT_PROBE_TIMEOUT_MS = Math.max(1000, parseInt(process.env.SAKANA_IMPORT_PROBE_TIMEOUT_MS || '15000', 10));
-const IMPORT_QUOTA_PROBE = process.env.SAKANA_IMPORT_QUOTA_PROBE !== '0';
-const IMPORT_QUOTA_TIMEOUT_MS = Math.max(1000, parseInt(process.env.SAKANA_IMPORT_QUOTA_TIMEOUT_MS || '10000', 10));
-const importProbeGuard = new ImportProbeGuard();
-// Last known import validation per account id (diagnostic only, never
-// credentials). Bounded so long-lived servers cannot grow it unboundedly.
-const IMPORT_VALIDATION_MAX = 50;
-const importValidations = new Map();
-function recordImportValidation(id, entry) {
-  if (!id) return;
-  importValidations.set(id, entry);
-  while (importValidations.size > IMPORT_VALIDATION_MAX) {
-    importValidations.delete(importValidations.keys().next().value);
-  }
-}
 // Optical second-stage compression (DeepSeek-OCR style): for writer requests
 // whose packaged document exceeds this many bytes, the older portion renders
 // into columnar page images; the recent tail stays as the txt attachment.
@@ -107,6 +90,8 @@ const stats = new Stats();
 const keyStore = new KeyStore();
 const accountPool = new AccountPool();
 const cache = new Cache();
+// Three-state auth (open / keyed / admin lock) lives in lib/http-auth.js.
+const { auth, isAdmin } = createAuth({ apiKey: API_KEY, adminKey: ADMIN_API_KEY, keyStore });
 
 const CARD_DIR = path.join(__dirname, 'character_cards');
 let activeCharacter = null;
@@ -171,27 +156,6 @@ const KNOWN_ERROR_CODES = new Set([
   'MULTIPART_BUDGET_EXCEEDED',
   'SERVER-SHUTDOWN', 'QUEUE_FULL', 'REQUEST-TIMEOUT',
 ]);
-
-function isPublicHttpUrl(value) {
-  try { safeRemoteUrl(value); return true; } catch { return false; }
-}
-
-// Harvest browser proxy is consumed by Chromium, not by our SSRF-guarded
-// fetchers, so loopback proxies (127.0.0.1:7897) are legitimate here. Accept a
-// scheme-qualified http/https/socks URL or a bare host:port, and nothing that
-// could smuggle Chromium arguments.
-function isBrowserProxy(value) {
-  const raw = String(value || '').trim();
-  if (!raw || /[\s'"]/.test(raw)) return false;
-  if (/^[a-z0-9+.-]+:\/\//i.test(raw)) {
-    let url;
-    try { url = new URL(raw); } catch { return false; }
-    if (!['http:', 'https:', 'socks:', 'socks4:', 'socks5:'].includes(url.protocol)) return false;
-    return !!url.hostname && (!url.pathname || url.pathname === '/');
-  }
-  const m = raw.match(/^([^\s/:]+):(\d{1,5})$/);
-  return !!m && Number(m[2]) > 0 && Number(m[2]) <= 65535;
-}
 
 function stableErrorCode(error, status = 500) {
   const raw = String(error?.errorCode || error?.code || '').toUpperCase();
@@ -447,12 +411,6 @@ function beginRequestLifecycle(req, res) {
   };
 }
 
-function sendJson(res, status, obj) {
-  const body = JSON.stringify(obj);
-  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
-  res.end(body);
-}
-
 /**
  * Backpressure-aware SSE writer. res.write() returning false means the TCP
  * buffer is full; without awaiting drain, a slow client plus a fast upstream
@@ -546,89 +504,6 @@ async function runChatResponse(chatBody, res, req = null) {
   }
 }
 
-function memorySnapshot() {
-  const mem = process.memoryUsage();
-  const mib = (value) => Math.round(value / 1048576);
-  return {
-    rssMB: mib(mem.rss),
-    heapUsedMB: mib(mem.heapUsed),
-    heapTotalMB: mib(mem.heapTotal),
-    externalMB: mib(mem.external),
-    arrayBuffersMB: mib(mem.arrayBuffers),
-  };
-}
-
-function readBody(req, limit = 32 * 1024 * 1024) {
-  const signal = req?.__signal;
-  const declared = Number(req?.headers?.['content-length']);
-  if (Number.isFinite(declared) && declared > limit) {
-    const error = new Error(`request body exceeds ${limit} bytes`);
-    error.code = 'BODY_TOO_LARGE';
-    error.status = 413;
-    req.resume?.();
-    return Promise.reject(error);
-  }
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    let settled = false;
-    const cleanup = () => {
-      req.removeListener('data', onData);
-      req.removeListener('end', onEnd);
-      req.removeListener('error', onError);
-      req.removeListener('aborted', onAborted);
-      req.removeListener('close', onClose);
-      signal?.removeEventListener?.('abort', onSignalAbort);
-    };
-    const settle = (error, value) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      req.__bodyBytes = size;
-      if (error) {
-        chunks.length = 0;
-        reject(error);
-      } else {
-        resolve(value);
-      }
-    };
-    const abortError = (reason) => makeAbortError(reason);
-    const onData = (chunk) => {
-      if (settled) return;
-      size += chunk.length;
-      if (size > limit) {
-        const error = new Error(`request body exceeds ${limit} bytes`);
-        error.code = 'BODY_TOO_LARGE';
-        settle(error);
-        req.resume();
-        return;
-      }
-      chunks.push(chunk);
-    };
-    const onEnd = () => settle(null, Buffer.concat(chunks));
-    const onError = (error) => settle(error);
-    const onAborted = () => settle(abortError());
-    const onClose = () => {
-      if (!req.complete) settle(abortError());
-    };
-    const onSignalAbort = () => {
-      settle(abortError(signal.reason));
-      req.resume?.();
-    };
-    if (signal?.aborted) {
-      onSignalAbort();
-      req.resume?.();
-      return;
-    }
-    req.on('data', onData);
-    req.once('end', onEnd);
-    req.once('error', onError);
-    req.once('aborted', onAborted);
-    req.once('close', onClose);
-    signal?.addEventListener?.('abort', onSignalAbort, { once: true });
-  });
-}
-
 function sseHeaders(res) {
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -636,42 +511,6 @@ function sseHeaders(res) {
     connection: 'keep-alive',
     'x-accel-buffering': 'no',
   });
-}
-
-// Auth: open when nothing enforced.
-// 多格式请求头适配:Authorization: Bearer / x-goog-api-key(Gemini 客户端) /
-// goog-api-key / x-api-key / api-key;另支持 Gemini 官方 ?key= 查询参数。
-function extractToken(req) {
-  const h = req.headers.authorization || '';
-  if (h.startsWith('Bearer ')) return h.slice(7);
-  const key = req.headers['x-goog-api-key'] || req.headers['goog-api-key'] ||
-    req.headers['x-api-key'] || req.headers['api-key'];
-  if (key) return key;
-  try {
-    const q = new URL(req.url, 'http://x').searchParams.get('key');
-    if (q) return q;
-  } catch {}
-  return '';
-}
-
-function auth(req) {
-  const activeKeys = keyStore.keys.filter((k) => !k.revoked).length;
-  if (!API_KEY && !ADMIN_API_KEY && activeKeys === 0 && keyStore.keys.length === 0) return true;
-  const tok = extractToken(req);
-  if (API_KEY && tok === API_KEY) return true;
-  if (ADMIN_API_KEY && tok === ADMIN_API_KEY) return true;
-  const key = keyStore.validate(tok);
-  if (key) { req.keyId = key.id; req.keyName = key.name; return true; }
-  return false;
-}
-
-function isAdmin(req) {
-  const activeKeys = keyStore.keys.filter((k) => !k.revoked).length;
-  if (!ADMIN_API_KEY && activeKeys === 0 && keyStore.keys.length === 0) return true;
-  const tok = extractToken(req);
-  // Managed API keys are for business endpoints only. Operational metadata and
-  // key management require the explicitly configured static admin secret.
-  return !!ADMIN_API_KEY && tok === ADMIN_API_KEY;
 }
 
 /** Mark only the account/lease that served this request. */
@@ -1760,6 +1599,42 @@ async function makeChatResponse(chatBody) {
   return chatResponse(chatBody, request, handleChatBody);
 }
 
+// Management endpoints live in lib/admin-routes.js; server.js keeps the route
+// order and wiring (P2 split, behavior unchanged).
+const adminApi = createAdminApi({
+  isAdmin,
+  stats,
+  keyStore,
+  cache,
+  accountPool,
+  autoSession,
+  mailConfig,
+  API_KEY,
+  ADMIN_API_KEY,
+  AUTO_SESSION,
+  SESSION_FILE,
+  auditLog,
+  persistAuditLog,
+  markAuditDirty: () => { auditDirty = true; },
+  contextStore,
+  contextTelemetry,
+  concurrencyManager,
+  CARD_DIR,
+  getActiveCharacter: () => activeCharacter,
+  setActiveCharacter: (card) => { activeCharacter = card; },
+  errors: { sanitizeError, clientErrorStatus, stableErrorCode },
+});
+
+// Public endpoints (panel, health, avatars) — see lib/public-routes.js.
+const publicApi = createPublicRoutes({
+  fs,
+  uiHtmlPath: UI_HTML_PATH,
+  version: VERSION,
+  cardDir: CARD_DIR,
+  loadCard,
+  sendJson,
+});
+
 const server = http.createServer(async (req, res) => {
   const lifecycle = beginRequestLifecycle(req, res);
   try {
@@ -1772,22 +1647,17 @@ const server = http.createServer(async (req, res) => {
 
     // public endpoints
     if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' });
-      return res.end(fs.readFileSync(UI_HTML_PATH, 'utf8'));
+      return publicApi.index(req, res);
     }
     if (req.method === 'GET' && p === '/health') {
-      return sendJson(res, 200, { ok: true, version: VERSION, uptimeSec: Math.floor(process.uptime()), memory: memorySnapshot() });
+      return publicApi.health(req, res);
     }
 
     // Character card avatars are public PNGs: <img> tags cannot send
     // authorization headers, so let them through the auth gate (the upstream
     // secrets live in the chat endpoints, not in a thumbnail).
     if (req.method === 'GET' && /^\/api\/characters\/[^/]+\/avatar$/.test(p)) {
-      const id = decodeURIComponent(p.slice('/api/characters/'.length, -'/avatar'.length));
-      const card = loadCard(CARD_DIR, id);
-      if (!card || !card.avatarPath || !fs.existsSync(card.avatarPath)) return sendJson(res, 404, { error: { message: 'avatar not found' } });
-      res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' });
-      return res.end(fs.readFileSync(card.avatarPath));
+      return publicApi.avatar(req, res, p);
     }
 
     if (!auth(req)) return sendJson(res, 401, { error: { message: 'missing/invalid proxy api key', type: 'authentication_error' } });
@@ -1917,440 +1787,21 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // Management endpoints
-    if (req.method === 'GET' && p === '/api/stats') {
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      let session = null;
-      try { session = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch {}
-      const s = stats.snapshot(session);
-      s.cache = cache.stats();
-      const mem = process.memoryUsage();
-      const pool = accountPool.snapshot();
-      s.accounts = {
-        total: pool.total,
-        active: pool.active,
-        limited: pool.limited,
-        expired: pool.expired,
-        max: pool.max,
-        inFlight: pool.inFlight,
-        stale: pool.stale,
-        target: pool.target,
-        targetMet: pool.targetMet,
-        replenishing: pool.replenishing,
-        refreshing: pool.refreshing,
-        leaseCount: pool.leaseCount,
-        oldestLeaseAgeMs: pool.oldestLeaseAgeMs,
-        lastHarvestAt: pool.lastHarvestAt,
-        lastHarvestErrorAt: pool.lastHarvestErrorAt,
-        lastHarvestError: pool.lastHarvestError || null,
-        telemetry: pool.telemetry,
-      };
-      s.auditCount = auditLog.length;
-      s.ops = {
-        concurrency: concurrencyManager.stats,
-        contextCount: contextStore.size,
-        uptimeSec: Math.floor((Date.now() - stats.startedAt) / 1000),
-        mem: { rssMB: Math.round(mem.rss / 1048576), heapMB: Math.round(mem.heapUsed / 1048576), heapMaxMB: Math.round(mem.heapTotal / 1048576) },
-        compact: { ...contextTelemetry },
-        browser: autoSession.status(),
-        node: process.version,
-        authMode: (API_KEY || ADMIN_API_KEY || keyStore.keys.length) ? 'keyed' : 'open',
-      };
-      return sendJson(res, 200, s);
-    }
-    if (p === '/api/keys') {
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      if (req.method === 'GET') {
-        const active = keyStore.keys.filter((k) => !k.revoked).length;
-        return sendJson(res, 200, { keys: keyStore.list(), keyed: !!(API_KEY || ADMIN_API_KEY || active), open: !API_KEY && !ADMIN_API_KEY && keyStore.keys.length === 0 });
-      }
-      if (req.method === 'POST') {
-        let b;
-        try { b = JSON.parse((await readBody(req)).toString('utf8')); }
-        catch (e) {
-          if (req.__signal?.aborted) throw e;
-          return sendJson(res, 400, { error: { message: 'invalid JSON' } });
-        }
-        return sendJson(res, 200, keyStore.create(b.name));
-      }
-      return sendJson(res, 405, { error: { message: 'method not allowed' } });
-    }
+    // Management endpoints (lib/admin-routes.js). Routing stays here so the
+    // dispatch order and the public/chat endpoints above are unchanged.
+    if (req.method === 'GET' && p === '/api/stats') return adminApi.stats(req, res);
+    if (p === '/api/keys') return adminApi.keys(req, res);
     const keyDel = /^\/api\/keys\/([^/]+)\/(revoke|delete)$/.exec(p);
-    if (req.method === 'POST' && keyDel) {
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      const ok = keyDel[2] === 'revoke' ? keyStore.revoke(decodeURIComponent(keyDel[1])) : keyStore.remove(decodeURIComponent(keyDel[1]));
-      return sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: { message: 'key not found' } });
-    }
-
-    // Audit log endpoints
-    if (req.method === 'GET' && (p === '/api/audit' || p === '/api/export-audit.csv')) {
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      if (p === '/api/export-audit.csv' || url.searchParams.get('format') === 'csv') {
-        const headers = ['id', 'ts', 'time_iso', 'method', 'path', 'model', 'status', 'duration_ms', 'error_code', 'error_category', 'stream', 'cache', 'request_bytes', 'response_bytes', 'context', 'request_headers', 'response_headers'];
-        const csvEscape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-        const csvRows = [headers.join(',')];
-        for (const e of auditLog) {
-          const row = [
-            e.id,
-            e.ts,
-            new Date(e.ts).toISOString(),
-            e.method,
-            e.path,
-            e.model,
-            e.status,
-            e.duration,
-            e.errorCode,
-            e.errorCategory,
-            e.stream,
-            e.cache,
-            e.requestBytes,
-            e.responseBytes,
-            JSON.stringify(e.context || {}),
-            JSON.stringify(e.requestHeaders || {}),
-            JSON.stringify(e.responseHeaders || {}),
-          ].map(csvEscape);
-          csvRows.push(row.join(','));
-        }
-        const csvStr = '\uFEFF' + csvRows.join('\r\n');
-        res.writeHead(200, {
-          'content-type': 'text/csv; charset=utf-8',
-          'content-disposition': `attachment; filename="sakana-audit-${Date.now()}.csv"`,
-          'content-length': Buffer.byteLength(csvStr),
-        });
-        return res.end(csvStr);
-      }
-      return sendJson(res, 200, { entries: auditLog.slice(0, 150) });
-    }
-
-    if (req.method === 'POST' && p === '/api/audit/clear') {
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      auditLog.length = 0;
-      auditDirty = true;
-      persistAuditLog();
-      return sendJson(res, 200, { ok: true });
-    }
-
-    // Accounts endpoint — ADMIN-only. Returns SAFE fields only: session cookies
-// and firebase tokens must never leave the server (any API-key holder could
-// otherwise steal and hijack the whole pool).
-    if (req.method === 'GET' && p === '/api/accounts') {
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      accountPool._checkCooldowns();
-      const safe = accountPool.accounts.map(a => accountPool.safeAccount(a));
-      const pool = accountPool.snapshot();
-      // Import diagnostics: per-account validation result + live lease pressure.
-      // Additive fields only; the account projection above stays unchanged.
-      const validations = {};
-      for (const [id, entry] of importValidations) validations[id] = entry;
-      return sendJson(res, 200, {
-        accounts: safe,
-        total: pool.total,
-        active: pool.active,
-        target: pool.target,
-        max: pool.max,
-        lastHarvestAt: pool.lastHarvestAt,
-        lastHarvestError: pool.lastHarvestError || null,
-        lastHarvestErrorAt: pool.lastHarvestErrorAt,
-        replenishing: pool.replenishing,
-        refreshing: pool.refreshing,
-        telemetry: pool.telemetry,
-        persistenceError: pool.persistenceError || null,
-        leaseCount: pool.leaseCount,
-        inFlight: pool.inFlight,
-        stale: pool.stale,
-        validations,
-        importProbe: importProbeGuard.snapshot(),
-      });
-    }
-
-    if (req.method === 'POST' && p === '/api/accounts/refresh') {
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      try {
-        if (AUTO_SESSION) {
-          accountPool.ensureMinPool((signal) => autoSession.harvestFresh({ signal }))
-            .then((ok) => console.log(`[accounts] manual refresh harvested ${ok} accounts`))
-            .catch((e) => console.log(`[accounts] manual refresh error: ${stableErrorCode(e, 500)}`));
-        }
-        return sendJson(res, 200, { ok: true, message: 'refresh + replenish triggered' });
-      } catch (e) {
-        const safe = sanitizeError(e, 500);
-        return sendJson(res, clientErrorStatus(e, 500), { error: { message: safe.message, type: safe.category, code: safe.code } });
-      }
-    }
-
-    // 2026-10: upstream blocks disposable-email registration (AUTH-EMAIL-001 /
-    // USER_DISABLED), so automated harvest cannot create accounts anymore.
-    // Admins seed the pool by importing a session cookie from a browser where
-    // they signed in to chat.sakana.ai manually.
-    if (req.method === 'POST' && p === '/api/accounts/import') {
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      let b;
-      try { b = JSON.parse((await readBody(req)).toString('utf8')); }
-      catch (e) {
-        if (req.__signal?.aborted) throw e;
-        return sendJson(res, 400, { error: { message: 'invalid JSON' } });
-      }
-      // Accepts a raw Cookie header, extension JSON, Playwright storageState,
-      // a cookies.txt jar or a structured cookies array; the pool always gets
-      // one canonical header plus structured cookies for refreshAccount.
-      const normalized = normalizeImportPayload(b);
-      if (!normalized.ok) {
-        return sendJson(res, 400, { error: { message: normalized.message, code: normalized.code } });
-      }
-      const cookieHeader = normalized.cookieHeader;
-
-      // Probe budget: a stale cookie gets one cheap answer, but repeated
-      // challenges/outages pause probing instead of hammering the Turnstile
-      // gate (which would harden the challenge against this egress IP).
-      const ticket = importProbeGuard.begin();
-      if (!ticket.allowed) {
-        const retryAfterMs = ticket.retryAfterMs;
-        return sendJson(res, 429, {
-          error: {
-            message: `account probe temporarily paused after repeated upstream failures — retry in ${Math.max(1, Math.ceil(retryAfterMs / 1000))}s`,
-            code: 'PROBE-BACKOFF',
-            reason: ticket.reason,
-            retryAfterMs,
-          },
-        });
-      }
-      const probe = await probeSession(cookieHeader, { timeoutMs: IMPORT_PROBE_TIMEOUT_MS })
-        .catch(() => ({ ok: false, status: 0, reason: 'network_error' }));
-      importProbeGuard.record({ ok: probe.ok, reason: probe.reason || (probe.ok ? 'ok' : 'network_error') });
-      if (!probe.ok) {
-        return sendJson(res, 400, {
-          error: {
-            message: `session cookie rejected by upstream (status ${probe.status}) — sign in at chat.sakana.ai and copy a fresh sakana-chat cookie`,
-            code: 'SESSION-REJECTED',
-            reason: probe.reason || 'invalid_session',
-            upstreamStatus: probe.status,
-            retryAfterMs: probe.retryAfterMs || 0,
-          },
-        });
-      }
-      // Quota snapshot (protocol.md §6b): tells the operator whether a live
-      // cookie is already day/week-capped before it occupies a pool slot.
-      // SAKANA_IMPORT_QUOTA_PROBE=0 skips this second upstream request.
-      let quota = null;
-      if (IMPORT_QUOTA_PROBE) {
-        quota = await probeQuota(cookieHeader, { timeoutMs: IMPORT_QUOTA_TIMEOUT_MS }).catch(() => null);
-      }
-      const id = accountPool.upsert({
-        cookieHeader,
-        cookies: normalized.cookies,
-        savedAt: Date.now(),
-        loggedIn: true,
-        uid: normalized.uid,
-        email: normalized.email,
-      });
-      if (!id) {
-        return sendJson(res, 409, { error: { message: 'session already in pool or pool entry quarantined', code: 'DUPLICATE-SESSION' } });
-      }
-      const validation = {
-        status: quota && Array.isArray(quota.exceeded) && quota.exceeded.length ? 'quota_exhausted' : 'active',
-        reason: 'ok',
-        checkedAt: Date.now(),
-        upstreamStatus: probe.status,
-        format: normalized.format,
-        cookieCount: normalized.cookieCount,
-        quota: quota ? {
-          ok: !!quota.ok,
-          status: quota.status,
-          models: quota.models || [],
-          exceeded: quota.exceeded || [],
-        } : null,
-      };
-      recordImportValidation(id, validation);
-      console.log(`[accounts] imported session cookie via admin (format ${normalized.format}, pool size ${accountPool.count()})`);
-      return sendJson(res, 200, { ok: true, id, poolSize: accountPool.count(), validation });
-    }
-
-    // Cache endpoints
-    if (req.method === 'POST' && p === '/api/cache/clear') {
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      cache.clear();
-      return sendJson(res, 200, { ok: true, stats: cache.stats() });
-    }
-
-    // Mail provider config (YYDS / mailtm) — panel-configurable, runtime-effective.
-    if (p === '/api/mail-config') {
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      if (req.method === 'GET') {
-        const saved = mailConfig.readMailConfig();
-        const provider = saved.provider || process.env.SAKANA_MAIL_PROVIDER || (process.env.YYDS_API_KEY ? 'yyds' : 'mailtm');
-        const key = saved.apiKey || process.env.YYDS_API_KEY || '';
-        return sendJson(res, 200, {
-          provider,
-          apiBase: saved.apiBase || process.env.YYDS_API_BASE || 'https://maliapi.215.im/v1',
-          domain: saved.domain || process.env.YYDS_DOMAIN || '',
-          hasKey: !!key,
-          keyPreview: key ? key.slice(0, 10) + '…' : null,
-          // Cloudflare Worker provider fields + harvest browser proxy
-          cfBase: saved.cfBase || process.env.CF_MAIL_BASE || '',
-          cfDomain: saved.cfDomain || process.env.CF_MAIL_DOMAIN || '',
-          cfHasKey: !!(saved.cfApiKey || process.env.CF_MAIL_API_KEY),
-          browserProxy: saved.browserProxy !== undefined ? saved.browserProxy
-            : (process.env.SAKANA_BROWSER_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || ''),
-        });
-      }
-      if (req.method === 'POST') {
-        let b;
-        try { b = JSON.parse((await readBody(req)).toString('utf8')); }
-        catch (e) {
-          if (req.__signal?.aborted) throw e;
-          return sendJson(res, 400, { error: { message: 'invalid JSON' } });
-        }
-        const provider = String(b?.provider || '').toLowerCase();
-        if (!['yyds', 'mailtm', 'cloudflare'].includes(provider)) {
-          return sendJson(res, 400, { error: { message: 'provider must be yyds, mailtm or cloudflare' } });
-        }
-        const saved = mailConfig.readMailConfig();
-        const next = {
-          provider,
-          apiKey: b.apiKey ? String(b.apiKey) : (saved.apiKey || process.env.YYDS_API_KEY || ''),
-          apiBase: b.apiBase ? String(b.apiBase) : (saved.apiBase || process.env.YYDS_API_BASE || 'https://maliapi.215.im/v1'),
-          domain: b.domain !== undefined ? String(b.domain) : (saved.domain || process.env.YYDS_DOMAIN || ''),
-          cfBase: b.cfBase ? String(b.cfBase).replace(/\/+$/, '') : (saved.cfBase || process.env.CF_MAIL_BASE || ''),
-          cfDomain: b.cfDomain !== undefined ? String(b.cfDomain) : (saved.cfDomain || process.env.CF_MAIL_DOMAIN || ''),
-          cfApiKey: b.cfApiKey ? String(b.cfApiKey) : (saved.cfApiKey || process.env.CF_MAIL_API_KEY || ''),
-          browserProxy: b.browserProxy !== undefined ? String(b.browserProxy) : (saved.browserProxy || ''),
-        };
-        if (provider === 'yyds' && !next.apiKey) {
-          return sendJson(res, 400, { error: { message: 'YYDS provider requires an API key (AC-…)' } });
-        }
-        if (provider === 'cloudflare' && !next.cfBase) {
-          return sendJson(res, 400, { error: { message: 'cloudflare provider requires a Worker API Base (如 https://apimail.example.com)' } });
-        }
-        if (!isPublicHttpUrl(next.apiBase)) {
-          return sendJson(res, 400, { error: { message: 'apiBase must be a public http(s) URL' } });
-        }
-        if (next.cfBase && !isPublicHttpUrl(next.cfBase)) {
-          return sendJson(res, 400, { error: { message: 'cfBase must be a public http(s) URL' } });
-        }
-        // The proxy is handed straight to Chromium, so accept only what
-        // Playwright accepts: an http(s)/socks URL, or host:port.
-        if (next.browserProxy && !isBrowserProxy(next.browserProxy)) {
-          return sendJson(res, 400, { error: { message: 'browserProxy must be an http(s)/socks proxy URL or host:port' } });
-        }
-        let verified = false;
-        if (provider === 'yyds' && next.apiKey) {
-          let result;
-          try {
-            result = await fetchRemoteJson(new URL('/me', next.apiBase).href, {
-              headers: { 'X-API-Key': next.apiKey },
-              signal: req.__signal,
-              maxBytes: 256 * 1024,
-            });
-          } catch {}
-          verified = !!result?.ok;
-        } else if (provider === 'cloudflare') {
-          // Prove the full path works by creating a disposable mailbox; the
-          // worker must be reached DIRECTLY (it 403s through a proxy), so this
-          // intentionally uses the global no-proxy dispatcher.
-          try {
-            const probe = await fetchRemoteJson(next.cfBase + '/api/new_address', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json', ...(next.cfApiKey ? { 'x-custom-auth': next.cfApiKey, 'x-api-key': next.cfApiKey } : {}) },
-              body: JSON.stringify(next.cfDomain ? { name: 'probe' + Date.now().toString(36), domain: next.cfDomain } : { name: 'probe' + Date.now().toString(36) }),
-              signal: req.__signal,
-              maxBytes: 256 * 1024,
-            });
-            verified = !!(probe?.ok && (probe.body?.address));
-          } catch {}
-        }
-        mailConfig.saveMailConfig(next);
-        console.log(`[mail-config] provider=${provider} domain=${next.domain || next.cfDomain || '(rotate)'} proxy=${next.browserProxy || '(env/direct)'} verified=${verified}`);
-        return sendJson(res, 200, { ok: true, verified, provider: next.provider, domain: next.domain || next.cfDomain });
-      }
-      return sendJson(res, 405, { error: { message: 'method not allowed' } });
-    }
-    if (req.method === 'POST' && p === '/api/mail-config/test') {
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      const provider = process.env.SAKANA_MAIL_PROVIDER || (process.env.YYDS_API_KEY ? 'yyds' : 'mailtm');
-      if (provider === 'cloudflare') {
-        const cfBase = (process.env.CF_MAIL_BASE || '').replace(/\/+$/, '');
-        if (!cfBase) return sendJson(res, 400, { error: { message: 'CF_MAIL_BASE not configured' } });
-        if (!isPublicHttpUrl(cfBase)) return sendJson(res, 400, { error: { message: 'CF_MAIL_BASE must be a public http(s) URL' } });
-        try {
-          const headers = { 'content-type': 'application/json', origin: cfBase, referer: cfBase + '/' };
-          if (process.env.CF_MAIL_API_KEY) {
-            headers['x-custom-auth'] = process.env.CF_MAIL_API_KEY;
-            headers['x-api-key'] = process.env.CF_MAIL_API_KEY;
-          }
-          const result = await fetchRemoteJson(cfBase + '/api/new_address', {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(process.env.CF_MAIL_DOMAIN ? { name: 'probe' + Date.now().toString(36), domain: process.env.CF_MAIL_DOMAIN } : { name: 'probe' + Date.now().toString(36) }),
-            signal: AbortSignal.any([req.__signal, AbortSignal.timeout(15000)].filter(Boolean)),
-            maxBytes: 256 * 1024,
-          });
-          const addr = result.body && result.body.address;
-          if (!result.ok || !addr) return sendJson(res, 200, { ok: false, message: `worker 返回 HTTP ${result.status}` });
-          return sendJson(res, 200, { ok: true, detail: `Cloudflare Worker 正常 · 测试邮箱 ${addr}` });
-        } catch (e) {
-          return sendJson(res, 200, { ok: false, message: 'network error（注意：邮箱 Worker 必须直连，不能挂代理）' });
-        }
-      }
-      if (provider !== 'yyds') return sendJson(res, 200, { ok: provider === 'mailtm', detail: provider === 'mailtm' ? 'mail.tm 无需 key(域名大概率已被上游封禁)' : 'provider not yyds' });
-      if (!process.env.YYDS_API_KEY) return sendJson(res, 400, { error: { message: 'YYDS_API_KEY not configured' } });
-      try {
-        const apiBase = process.env.YYDS_API_BASE || 'https://maliapi.215.im/v1';
-        if (!isPublicHttpUrl(apiBase)) return sendJson(res, 400, { error: { message: 'YYDS_API_BASE must be a public http(s) URL' } });
-        const result = await fetchRemoteJson(new URL('/me', apiBase).href, {
-          headers: { 'X-API-Key': process.env.YYDS_API_KEY },
-          signal: AbortSignal.any([req.__signal, AbortSignal.timeout(15000)].filter(Boolean)),
-          maxBytes: 256 * 1024,
-        });
-        if (!result.ok) return sendJson(res, 200, { ok: false, message: `上游返回 HTTP ${result.status}` });
-        return sendJson(res, 200, { ok: true, detail: 'YYDS connection healthy' });
-      } catch (e) {
-        return sendJson(res, 200, { ok: false, message: 'network error' });
-      }
-    }
-
-    // Character card management
-    if (p.startsWith('/api/characters')) {
-      // The avatar is served publicly before the auth gate (see above).
-      if (!isAdmin(req)) return sendJson(res, 403, { error: { message: 'admin key required', type: 'forbidden' } });
-      // POST /api/characters/upload — upload a PNG character card
-      if (req.method === 'POST' && p === '/api/characters/upload') {
-        try {
-          const raw = await readBody(req);
-          const parsed = parsePngCard(raw);
-          const card = normalizeCard(parsed.json, parsed.spec);
-          const record = saveCard(CARD_DIR, card, parsed.png);
-          console.log('[character-card] uploaded:', record.name);
-          return sendJson(res, 200, { id: record.id, name: record.name, description: (record.description || '').slice(0, 100) });
-        } catch (e) {
-          if (req.__signal?.aborted) throw e;
-          const safe = sanitizeError(e, 400);
-          return sendJson(res, 400, { error: { message: safe.message, type: 'invalid_character_card', code: safe.code } });
-        }
-      }
-      // GET /api/characters — list all cards
-      if (req.method === 'GET' && p === '/api/characters') {
-        const cards = listCards(CARD_DIR);
-        return sendJson(res, 200, { characters: cards, active: activeCharacter ? { id: activeCharacter.id, name: activeCharacter.name } : null });
-      }
-      // GET /api/characters/active — get active character info
-      if (req.method === 'GET' && p === '/api/characters/active') {
-        return sendJson(res, 200, { character: activeCharacter ? { id: activeCharacter.id, name: activeCharacter.name } : null });
-      }
-      // POST /api/characters/deactivate — clear active character
-      if (req.method === 'POST' && p === '/api/characters/deactivate') {
-        activeCharacter = null;
-        return sendJson(res, 200, { ok: true });
-      }
-      // POST /api/characters/:id/activate — set a specific card as active
-      if (req.method === 'POST' && p.endsWith('/activate') && p.length > 22) {
-        const id = decodeURIComponent(p.slice('/api/characters/'.length, -'/activate'.length));
-        const card = loadCard(CARD_DIR, id);
-        if (!card) return sendJson(res, 404, { error: { message: 'character not found' } });
-        activeCharacter = card;
-        return sendJson(res, 200, { ok: true, id: card.id, name: card.name });
-      }
-      return sendJson(res, 404, { error: { message: 'not found: ' + p, type: 'invalid_request_error' } });
-    }
+    if (req.method === 'POST' && keyDel) return adminApi.keyAction(req, res, keyDel);
+    if (req.method === 'GET' && (p === '/api/audit' || p === '/api/export-audit.csv')) return adminApi.audit(req, res, p, url);
+    if (req.method === 'POST' && p === '/api/audit/clear') return adminApi.auditClear(req, res);
+    if (req.method === 'GET' && p === '/api/accounts') return adminApi.accountsList(req, res);
+    if (req.method === 'POST' && p === '/api/accounts/refresh') return adminApi.accountsRefresh(req, res);
+    if (req.method === 'POST' && p === '/api/accounts/import') return adminApi.accountsImport(req, res);
+    if (req.method === 'POST' && p === '/api/cache/clear') return adminApi.cacheClear(req, res);
+    if (p === '/api/mail-config') return adminApi.mailConfig(req, res);
+    if (req.method === 'POST' && p === '/api/mail-config/test') return adminApi.mailConfigTest(req, res);
+    if (p.startsWith('/api/characters')) return adminApi.characters(req, res, p);
 
     return sendJson(res, 404, { error: { message: 'not found: ' + p, type: 'invalid_request_error' } });
   } catch (e) {
