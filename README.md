@@ -427,6 +427,7 @@ SAKANA_MAIL_PROVIDER=yyds YYDS_API_KEY=... YYDS_API_BASE=... \
 它会依次：注册一个全新账号（真实浏览器 + 魔法链接）→ 用该会话启动一个临时代理 → 校验模型列表 → 非流式与流式各发一次真实对话 → 走管理接口导入同一 cookie → 检查账号池投影不泄露 cookie。输出 `LIVE_RESULTS` JSON，全绿退出码 0。
 
 - 复用已有会话（跳过注册）：`SAKANA_E2E_SESSION_FILE=./session.json npm run test:live`
+- 已部署实例的多轮/大文本/文件/并发压测：`BASE_URL=http://host:8787 API_KEY=... npm run test:stress:live`。会输出每次调用的耗时、token、错误与服务器审计尾部到 `stress-report.json`。
 - 本机若使用 TUN/fake-IP 代理，DNS 会被解析到 198.18/15 并被 SSRF 防护拒绝；仅本地测试可显式钉真实 IP：`SAKANA_E2E_DNS="maliapi.215.im=162.159.130.234"`。生产环境不要设置该变量。
 - 该测试会消耗真实注册与模型额度，不纳入 `npm test`。
 

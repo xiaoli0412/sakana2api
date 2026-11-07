@@ -19,7 +19,8 @@
     "test:http": "node tests/longcontext-upstream.test.mjs && node tests/rp-http-smoke.test.mjs && node tests/search-chain.test.mjs && node tests/optical-context.test.mjs && node tests/sse-heartbeat.test.mjs && node tests/usage-accounting.test.mjs && node tests/admin-boundary-http.test.mjs && node tests/shutdown-cleanup.test.mjs && node tests/auto-session-lifecycle.test.mjs && node tests/observability.test.mjs && node tests/ui-smoke.test.mjs && node tests/sakana_browser_test.mjs && node tests/concurrency_100.test.mjs && node tests/context-isolation-http.test.mjs && node tests/security-mail-transport.test.mjs && node tests/security-remote-fetch.test.mjs && node tests/security-optical-context.test.mjs && node tests/ui-theme.test.mjs",
     "test:native": "node tests/native.test.mjs",
     "test:deploy": "python tests/deployment-runtime.test.py",
-    "test:live": "node scripts/e2e_real_flow.mjs"
+    "test:live": "node scripts/e2e_real_flow.mjs",
+    "test:stress:live": "node scripts/stress_remote.mjs"
   },
   "engines": {
     "node": ">=22"
